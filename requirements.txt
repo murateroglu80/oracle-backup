@@ -1,3 +1,4 @@
 PyYAML>=5.1
 requests>=2.20.0
 hvac>=0.10.0
+paramiko

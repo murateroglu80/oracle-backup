@@ -1,18 +1,26 @@
-# Oracle RMAN Backup Script
+# Oracle RMAN Backup Script (Jump Server Edition)
 
-Bu Python betiği, Oracle veritabanları için gelişmiş RMAN yedekleme otomasyonu sunar. Yedekleme geçmişi tutma, akıllı disk alanı yönetimi, HashiCorp Vault entegrasyonu, SMTP bildirimleri ve SCP/Rsync aracılığıyla uzak sunucuya yedek kopyalama özelliklerini içerir.
+Bu Python betiği, Oracle veritabanları için gelişmiş RMAN yedekleme otomasyonu sunar. **Jump Server (Merkezi Yönetim)** mimarisiyle çalışacak şekilde tasarlanmıştır. Bu sayede tüm veritabanı sunucularına tek tek Python kurmak yerine, betiği sadece bir merkezi sunucuda çalıştırarak tüm veritabanlarınızı uzaktan (SSH üzerinden) yönetebilirsiniz.
+
+## Özellikler
+- **Merkezi Yönetim (Jump Server):** Loglar, geçmiş verileri (history) ve yapılandırmalar (Vault token dahil) tek bir güvenli sunucuda tutulur.
+- Yedekleme geçmişi tutma ve akıllı disk alanı yönetimi.
+- HashiCorp Vault entegrasyonu ve SMTP bildirimleri.
+- SCP/Rsync aracılığıyla hedef DB sunucusundan bir diğer uzak sunucuya yedek kopyalama.
 
 ## Gereksinimler
 
-- Python 3.6 veya üzeri
-- `pip` paket yöneticisi
+- **Jump Server (Bu scriptin çalışacağı makine):**
+  - Python 3.6 veya üzeri
+  - `pip` paket yöneticisi
+- **Veritabanı Sunucusu (Oracle):**
+  - Sadece standart RMAN ve SSH erişimi (Python gerektirmez!)
 - (Opsiyonel) HashiCorp Vault sunucusu
 - (Opsiyonel) Prometheus veya Zabbix Server
-- Hedef sunucu için SSH/SCP bağlantı altyapısı (Key tabanlı kimlik doğrulama önerilir)
 
 ## Kurulum
 
-1. Depoyu sunucunuza kopyalayın:
+1. Depoyu **Jump Server**'ınıza kopyalayın:
    ```bash
    git clone https://bitbucket.org/mipsoftdev/oracle-backup.git
    cd oracle-backup
@@ -22,33 +30,41 @@ Bu Python betiği, Oracle veritabanları için gelişmiş RMAN yedekleme otomasy
    ```bash
    pip install -r requirements.txt
    ```
-   *Not: Ortamınızda `pip` yoksa veya virtual environment kullanmak isterseniz `python3 -m venv venv` ile bir sanal ortam oluşturup kurulum yapabilirsiniz.*
 
 ## Yapılandırma (`config.yaml`)
 
-Scriptin tüm davranışları `config.yaml` dosyasından yönetilir. Herhangi bir kod değişikliği yapmadan ortamınıza göre bu dosyayı düzenlemelisiniz.
-
-- **ORACLE_CONFIG**: Veritabanı bağlantı detayları ve ORACLE_HOME yolları.
+- **TARGET_SERVER**: Scriptin SSH ile bağlanıp yedekleme işlemlerini (RMAN) tetikleyeceği asıl Oracle veritabanı sunucusu.
+  - `host`: Veritabanı IP/Hostname
+  - `user`: `oracle` veya yetkili kullanıcı
+  - `key_file`: Şifresiz SSH erişimi için anahtar yolunuz (Örn: `~/.ssh/id_rsa`). Eğer şifre kullanacaksanız `password: "şifreniz"` satırını ekleyebilirsiniz.
+- **ORACLE_CONFIG**: Hedef sunucudaki Veritabanı bağlantı detayları ve ORACLE_HOME yolları.
 - **BACKUP_CONFIG**: 
-  - `backup_root`: Yerel yedekleme dizini.
-  - `remote_dest`: Uzak sunucu dizini (Örn: `oracle@192.168.210.124:/share/oracle` Windows için de geçerlidir).
-  - `transfer_method`: Dosyaları uzaktaki sunucuya atarken `scp` mi yoksa `rsync` mi kullanılacağını seçin. Windows sunucular için `scp` önerilir.
-  - `transfer_hours`: Uzak sunucuya dosyaların atılacağı saati belirler (Örn: `[20]`). Her çalışmada transfer yapılmasını istiyorsanız `"all"` yazabilirsiniz.
-- **MAIL_CONFIG**:
-  - `enabled`: Mail gönderimini açar/kapatır.
-  - `use_auth`: Eğer SMTP relay kullanıyorsanız ve şifreye gerek yoksa `False` yapın. Eğer Office365 vb. şifreli bir sistem kullanıyorsanız `True` yapın.
-  - `smtp_password`: Vault devre dışıyken kullanılacak statik şifre.
-- **VAULT_CONFIG**: HashiCorp Vault ayarları. Vault kullanmıyorsanız `enabled: False` yapabilirsiniz.
+  - `backup_root`: Hedef sunucudaki (Oracle DB makinesindeki) yedekleme dizini.
+  - `log_dir` ve `history_dir`: **Jump Server** üzerindeki lokal log yolları.
+  - `remote_dest`: Hedef DB sunucusunun yedekleri kopyalayacağı nihai uzak sunucu.
+  - `transfer_method`: Windows hedefler için `scp`, Linux için `rsync` önerilir.
+  - `transfer_hours`: Her çalışmada transfer için `"all"` kullanabilirsiniz.
+- **MAIL_CONFIG** ve **VAULT_CONFIG**: E-posta ve şifre kasası ayarları.
+
+## Güvenlik ve SSH Yetkilendirmesi (Passwordless SSH)
+Jump Server'ın hedef Oracle sunucusuna şifre girmeden bağlanabilmesi için SSH anahtarı oluşturup hedef sunucuya kopyalamanız gerekir:
+```bash
+# Jump Server'da (eğer daha önce üretmediyseniz):
+ssh-keygen -t rsa
+
+# Hedef DB Sunucusuna anahtarı kopyalamak için:
+ssh-copy-id -i ~/.ssh/id_rsa.pub oracle@hedef_db_sunucusu
+```
+
+Aynı şekilde eğer SCP transferi yapılacaksa, **Hedef DB Sunucusu**'nun da yedeklerin gönderileceği nihai Windows/Linux sunucusuna SSH anahtarı üzerinden erişebiliyor olması gerekir.
 
 ## Test Modu (Dry-Run, Mail Test, ve SCP Test)
 
-Yedekleme ve transfer işlemlerini gerçekten çalıştırmadan yapılandırmanızı ve scriptin doğru çalıştığını test etmek için scripti argümanlarla çalıştırabilirsiniz:
-
 ```bash
-# RMAN, SCP/Rsync işlemlerini atlayarak (sadece loglara yazar) scriptin çalışmasını simüle eder:
+# RMAN, SCP/Rsync işlemlerini atlayarak scriptin çalışmasını simüle eder:
 python3 backup.py --dry-run
 
-# Sadece Mail yapılandırmasını, Vault bağlantısını/SMTP şifresini test eder ve test e-postası gönderir:
+# Sadece Mail yapılandırmasını test eder ve test e-postası gönderir:
 python3 backup.py --test-mail
 
 # Sadece Control File yedeği alıp, bunu hemen SCP/Rsync ile uzak sunucuya göndererek bağlantıyı/transferi test eder:
@@ -57,16 +73,13 @@ python3 backup.py --test-transfer
 
 ## Otomasyon (Crontab Kurulumu)
 
-Scriptin her saat başı çalışarak kendi takvimini yönetmesi için crontab'a ekleyebilirsiniz:
+Jump Server üzerinde scriptin her saat başı çalışması için crontab'a ekleyebilirsiniz:
 
 ```bash
 crontab -e
 ```
 
-Aşağıdaki satırı ekleyin (dosya yollarını kendi ortamınıza göre güncelleyin):
+Aşağıdaki satırı ekleyin:
 ```bash
 0 * * * * /usr/bin/python3 /path/to/oracle-backup/backup.py >> /tmp/oracle_backup_cron.log 2>&1
 ```
-
-## Güvenlik ve Yetkilendirme (SCP Windows)
-Eğer Windows bir sunucuya SCP ile aktarım yapacaksanız, Oracle sunucusundaki kullanıcının SSH anahtarını Windows sunucusunda `authorized_keys` içine ekleyerek parolasız bağlantı sağladığınızdan emin olun.

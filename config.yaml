@@ -11,6 +11,12 @@ GI_CONFIG:
   GI_ENABLED: True
   GRID_HOME: "/u01/app/19/grid"
 
+TARGET_SERVER:
+  host: "tr-db-ora1.imperial.local"
+  user: "oracle"
+  port: 22
+  key_file: "~/.ssh/id_rsa"
+
 BACKUP_CONFIG:
   backup_root: "/backup"
   log_dir: "/backup/huaris/logs"
