@@ -33,7 +33,7 @@ Scriptin tüm davranışları `config.yaml` dosyasından yönetilir. Herhangi bi
   - `backup_root`: Yerel yedekleme dizini.
   - `remote_dest`: Uzak sunucu dizini (Örn: `oracle@192.168.210.124:/share/oracle` Windows için de geçerlidir).
   - `transfer_method`: Dosyaları uzaktaki sunucuya atarken `scp` mi yoksa `rsync` mi kullanılacağını seçin. Windows sunucular için `scp` önerilir.
-  - `transfer_hours`: Uzak sunucuya dosyaların atılacağı saati belirler.
+  - `transfer_hours`: Uzak sunucuya dosyaların atılacağı saati belirler (Örn: `[20]`). Her çalışmada transfer yapılmasını istiyorsanız `"all"` yazabilirsiniz.
 - **MAIL_CONFIG**:
   - `enabled`: Mail gönderimini açar/kapatır.
   - `use_auth`: Eğer SMTP relay kullanıyorsanız ve şifreye gerek yoksa `False` yapın. Eğer Office365 vb. şifreli bir sistem kullanıyorsanız `True` yapın.

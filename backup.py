@@ -756,7 +756,8 @@ QUIT;
     transfer_hours = BACKUP_CONFIG.get("transfer_hours", BACKUP_CONFIG.get("rsync_hours", []))
     transfer_method = BACKUP_CONFIG.get("transfer_method", "rsync").lower()
 
-    if not error_msg and (hour in transfer_hours or test_transfer):
+    is_transfer_hour = (transfer_hours == "all" or transfer_hours == ["all"] or (isinstance(transfer_hours, list) and hour in transfer_hours))
+    if not error_msg and (is_transfer_hour or test_transfer):
         transfer_triggered = True
         transfer_start_time = datetime.now()
         transfer_overall_start = time.time()
