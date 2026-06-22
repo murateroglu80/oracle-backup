@@ -14,6 +14,7 @@ Advanced Refactoring:
 
 import os
 import sys
+import argparse
 import subprocess
 import shutil
 import time
@@ -594,13 +595,49 @@ def send_daily_summary(history_dir, mail_config, smtp_password, logger, target_d
 # 9. MAIN
 # ============================================================
 
-def main():
+def main(dry_run=False, test_mail=False):
     config = load_config("config.yaml")
     ORACLE_CONFIG = config["ORACLE_CONFIG"]
     BACKUP_CONFIG = config["BACKUP_CONFIG"]
     MAIL_CONFIG = config["MAIL_CONFIG"]
     VAULT_CONFIG = config["VAULT_CONFIG"]
     MONITORING_CONFIG = config.get("MONITORING_CONFIG", {})
+
+    logger = setup_logging(BACKUP_CONFIG["log_dir"] + "/backup_test.log" if dry_run else BACKUP_CONFIG["log_dir"] + "/backup_latest.log")
+    if dry_run:
+        logger.info("=== STARTING IN DRY-RUN MODE ===")
+    
+    if test_mail:
+        logger.info("=== STARTING TEST MAIL ===")
+        if MAIL_CONFIG.get("enabled"):
+            smtp_password = None
+            if MAIL_CONFIG.get("use_auth", True):
+                if VAULT_CONFIG.get("enabled", True):
+                    smtp_password = get_vault_secret(VAULT_CONFIG, logger)
+                else:
+                    smtp_password = MAIL_CONFIG.get("smtp_password")
+            
+            try:
+                msg = MIMEMultipart("alternative")
+                msg["Subject"] = Header(f"{MAIL_CONFIG['subject_prefix']} [TEST] Mail Configuration", "utf-8")
+                msg["From"]    = MAIL_CONFIG["from_addr"]
+                msg["To"]      = ", ".join(MAIL_CONFIG["to_addrs"])
+                msg.attach(MIMEText("<html><body><h3>SMTP Test Successful</h3><p>If you see this, your SMTP and Vault settings are correct.</p></body></html>", "html", "utf-8"))
+                
+                with smtplib.SMTP(MAIL_CONFIG["smtp_host"], MAIL_CONFIG["smtp_port"], timeout=30) as srv:
+                    srv.ehlo()
+                    if MAIL_CONFIG.get("use_tls"):
+                        srv.starttls()
+                        srv.ehlo()
+                    if MAIL_CONFIG.get("use_auth", True):
+                        srv.login(MAIL_CONFIG["smtp_user"], smtp_password)
+                    srv.sendmail(MAIL_CONFIG["from_addr"], MAIL_CONFIG["to_addrs"], msg.as_string())
+                logger.info("Test email sent successfully.")
+            except Exception as e:
+                logger.error(f"Failed to send test email: {e}")
+        else:
+            logger.info("Mail is disabled in config.")
+        return
 
     now  = datetime.now()
     hour = now.hour
@@ -616,11 +653,13 @@ def main():
     history_dir = BACKUP_CONFIG.get("history_dir")
 
     os.makedirs(log_dir, exist_ok=True)
-    os.makedirs(full_path, exist_ok=True)
-    os.makedirs(history_dir, exist_ok=True)
+    if not dry_run:
+        os.makedirs(full_path, exist_ok=True)
+        os.makedirs(history_dir, exist_ok=True)
 
-    logger      = setup_logging(log_file)
-    env         = setup_environment(ORACLE_CONFIG)
+    # Re-setup logger with the proper log file
+    logger = setup_logging(log_file)
+    env    = setup_environment(ORACLE_CONFIG)
     oracle_sid  = ORACLE_CONFIG["ORACLE_SID"]
 
     locked, pid = acquire_lock(pid_file)
@@ -668,7 +707,10 @@ BACKUP AS COMPRESSED BACKUPSET CURRENT CONTROLFILE
 {archivelog_deletion_cmd}
 QUIT;
 """
-        run_rman(logger, env, rman_script, label="full_backup")
+        if dry_run:
+            logger.info(f"[DRY-RUN] Would execute RMAN script:\n{rman_script}")
+        else:
+            run_rman(logger, env, rman_script, label="full_backup")
 
     except Exception as exc:
         error_msg = str(exc)
@@ -680,11 +722,11 @@ QUIT;
     success_status = "FAILED" if error_msg else "SUCCESS"
     
     # Save Persistent History
-    append_history(history_dir, {
+    history_record = {
         "run_time": backup_start.strftime("%Y-%m-%d %H:%M:%S"),
         "start_time": backup_start.strftime("%Y-%m-%d %H:%M:%S"),
         "end_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "operation": "Backup",
+        "operation": "Backup" if not dry_run else "Backup (Dry-Run)",
         "directory": full_path,
         "duration": format_duration(backup_elapsed),
         "size_gb": f"{get_dir_size_gb(full_path):.1f}" if not error_msg else "0",
@@ -693,7 +735,12 @@ QUIT;
         "errors_warnings": error_msg or "None",
         "is_deleted": False,
         "deleted_at": None
-    })
+    }
+    
+    if dry_run:
+        logger.info(f"[DRY-RUN] Would append history: {history_record}")
+    else:
+        append_history(history_dir, history_record)
 
     # STEP 3: Transfer (Rsync/SCP if configured)
     transfer_triggered = False
@@ -711,26 +758,30 @@ QUIT;
             remote_path = BACKUP_CONFIG["remote_dest"].split(":")[1]
             remote_full_dest = f"{BACKUP_CONFIG['remote_dest']}/{day_name}"
 
-            if transfer_method == "scp":
-                # For Windows targets we try ssh mkdir, but ignore errors if it fails, and also try cmd /c mkdir
-                mkdir_cmd = f"mkdir -p {remote_path}/{day_name}"
-                subprocess.run(["ssh", remote_base, mkdir_cmd], timeout=30, stderr=subprocess.DEVNULL)
-                mkdir_win_cmd = f"cmd /c mkdir \"{remote_path}\\{day_name}\""
-                subprocess.run(["ssh", remote_base, mkdir_win_cmd], timeout=30, stderr=subprocess.DEVNULL)
-                
-                transfer_elapsed, avg_speed, attempts, _ = run_scp(logger, full_path, remote_full_dest)
+            if dry_run:
+                logger.info(f"[DRY-RUN] Would create directory {remote_path}/{day_name} and transfer to {remote_full_dest} via {transfer_method}")
+                transfer_elapsed, avg_speed, attempts = 0.5, 100.0, 1
             else:
-                # Use Rsync
-                mkdir_cmd = f"mkdir -p {remote_path}/{day_name}"
-                subprocess.run(["ssh", remote_base, mkdir_cmd], timeout=30)
-                
-                transfer_elapsed, avg_speed, attempts, _ = run_rsync(logger, full_path, remote_full_dest)
+                if transfer_method == "scp":
+                    # For Windows targets we try ssh mkdir, but ignore errors if it fails, and also try cmd /c mkdir
+                    mkdir_cmd = f"mkdir -p {remote_path}/{day_name}"
+                    subprocess.run(["ssh", remote_base, mkdir_cmd], timeout=30, stderr=subprocess.DEVNULL)
+                    mkdir_win_cmd = f"cmd /c mkdir \"{remote_path}\\{day_name}\""
+                    subprocess.run(["ssh", remote_base, mkdir_win_cmd], timeout=30, stderr=subprocess.DEVNULL)
+                    
+                    transfer_elapsed, avg_speed, attempts, _ = run_scp(logger, full_path, remote_full_dest)
+                else:
+                    # Use Rsync
+                    mkdir_cmd = f"mkdir -p {remote_path}/{day_name}"
+                    subprocess.run(["ssh", remote_base, mkdir_cmd], timeout=30)
+                    
+                    transfer_elapsed, avg_speed, attempts, _ = run_rsync(logger, full_path, remote_full_dest)
             
-            append_history(history_dir, {
+            transfer_record = {
                 "run_time": transfer_start_time.strftime("%Y-%m-%d %H:%M:%S"),
                 "start_time": transfer_start_time.strftime("%Y-%m-%d %H:%M:%S"),
                 "end_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "operation": transfer_method.capitalize(),
+                "operation": transfer_method.capitalize() if not dry_run else f"{transfer_method.capitalize()} (Dry-Run)",
                 "directory": remote_full_dest,
                 "duration": format_duration(transfer_elapsed),
                 "transfer_speed_mbps": round(avg_speed, 2),
@@ -743,7 +794,11 @@ QUIT;
                 "errors_warnings": "None",
                 "is_deleted": False,
                 "deleted_at": None
-            })
+            }
+            if dry_run:
+                logger.info(f"[DRY-RUN] Would append transfer history: {transfer_record}")
+            else:
+                append_history(history_dir, transfer_record)
         except Exception as e:
             append_history(history_dir, {
                 "run_time": transfer_start_time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -772,7 +827,10 @@ QUIT;
             mark_history_deleted(history_dir, bdir)
 
     # Push Metrics
-    push_metrics(logger, MONITORING_CONFIG, oracle_sid, backup_elapsed, free_gb, required_gb, not bool(error_msg))
+    if dry_run:
+        logger.info("[DRY-RUN] Would push metrics.")
+    else:
+        push_metrics(logger, MONITORING_CONFIG, oracle_sid, backup_elapsed, free_gb, required_gb, not bool(error_msg))
 
     # Send Daily Summary
     daily_mail_hour = MAIL_CONFIG.get("daily_mail_hour", 23)
@@ -798,4 +856,9 @@ QUIT;
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="Oracle RMAN Backup Script")
+    parser.add_argument("--dry-run", action="store_true", help="Run the script without executing RMAN, Rsync/SCP, or modifying history.")
+    parser.add_argument("--test-mail", action="store_true", help="Send a test email using the configured SMTP settings and exit.")
+    args = parser.parse_args()
+
+    main(dry_run=args.dry_run, test_mail=args.test_mail)
