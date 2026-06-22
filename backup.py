@@ -595,7 +595,7 @@ def send_daily_summary(history_dir, mail_config, smtp_password, logger, target_d
 # 9. MAIN
 # ============================================================
 
-def main(dry_run=False, test_mail=False):
+def main(dry_run=False, test_mail=False, test_transfer=False):
     config = load_config("config.yaml")
     ORACLE_CONFIG = config["ORACLE_CONFIG"]
     BACKUP_CONFIG = config["BACKUP_CONFIG"]
@@ -603,9 +603,11 @@ def main(dry_run=False, test_mail=False):
     VAULT_CONFIG = config["VAULT_CONFIG"]
     MONITORING_CONFIG = config.get("MONITORING_CONFIG", {})
 
-    logger = setup_logging(BACKUP_CONFIG["log_dir"] + "/backup_test.log" if dry_run else BACKUP_CONFIG["log_dir"] + "/backup_latest.log")
+    logger = setup_logging(BACKUP_CONFIG["log_dir"] + "/backup_test.log" if (dry_run or test_transfer) else BACKUP_CONFIG["log_dir"] + "/backup_latest.log")
     if dry_run:
         logger.info("=== STARTING IN DRY-RUN MODE ===")
+    if test_transfer:
+        logger.info("=== STARTING TEST TRANSFER MODE ===")
     
     if test_mail:
         logger.info("=== STARTING TEST MAIL ===")
@@ -687,7 +689,14 @@ def main(dry_run=False, test_mail=False):
         else:
             archivelog_deletion_cmd = "DELETE NOPROMPT ARCHIVELOG ALL BACKED UP 1 TIMES TO DISK;"
 
-        rman_script = f"""
+        if test_transfer:
+            rman_script = f"""
+BACKUP AS COMPRESSED BACKUPSET CURRENT CONTROLFILE
+  FORMAT '{full_path}/controlfile_test_{file_name}';
+QUIT;
+"""
+        else:
+            rman_script = f"""
 CROSSCHECK BACKUP;
 CROSSCHECK ARCHIVELOG ALL;
 DELETE NOPROMPT EXPIRED ARCHIVELOG ALL;
@@ -710,7 +719,7 @@ QUIT;
         if dry_run:
             logger.info(f"[DRY-RUN] Would execute RMAN script:\n{rman_script}")
         else:
-            run_rman(logger, env, rman_script, label="full_backup")
+            run_rman(logger, env, rman_script, label="test_backup" if test_transfer else "full_backup")
 
     except Exception as exc:
         error_msg = str(exc)
@@ -747,7 +756,7 @@ QUIT;
     transfer_hours = BACKUP_CONFIG.get("transfer_hours", BACKUP_CONFIG.get("rsync_hours", []))
     transfer_method = BACKUP_CONFIG.get("transfer_method", "rsync").lower()
 
-    if not error_msg and hour in transfer_hours:
+    if not error_msg and (hour in transfer_hours or test_transfer):
         transfer_triggered = True
         transfer_start_time = datetime.now()
         transfer_overall_start = time.time()
@@ -859,6 +868,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Oracle RMAN Backup Script")
     parser.add_argument("--dry-run", action="store_true", help="Run the script without executing RMAN, Rsync/SCP, or modifying history.")
     parser.add_argument("--test-mail", action="store_true", help="Send a test email using the configured SMTP settings and exit.")
+    parser.add_argument("--test-transfer", action="store_true", help="Run a quick backup of only the control file and transfer it via SCP/Rsync to test the remote connection.")
     args = parser.parse_args()
 
-    main(dry_run=args.dry_run, test_mail=args.test_mail)
+    main(dry_run=args.dry_run, test_mail=args.test_mail, test_transfer=args.test_transfer)

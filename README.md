@@ -40,7 +40,7 @@ Scriptin tüm davranışları `config.yaml` dosyasından yönetilir. Herhangi bi
   - `smtp_password`: Vault devre dışıyken kullanılacak statik şifre.
 - **VAULT_CONFIG**: HashiCorp Vault ayarları. Vault kullanmıyorsanız `enabled: False` yapabilirsiniz.
 
-## Test Modu (Dry-Run ve Mail Test)
+## Test Modu (Dry-Run, Mail Test, ve SCP Test)
 
 Yedekleme ve transfer işlemlerini gerçekten çalıştırmadan yapılandırmanızı ve scriptin doğru çalıştığını test etmek için scripti argümanlarla çalıştırabilirsiniz:
 
@@ -50,6 +50,9 @@ python3 backup.py --dry-run
 
 # Sadece Mail yapılandırmasını, Vault bağlantısını/SMTP şifresini test eder ve test e-postası gönderir:
 python3 backup.py --test-mail
+
+# Sadece Control File yedeği alıp, bunu hemen SCP/Rsync ile uzak sunucuya göndererek bağlantıyı/transferi test eder:
+python3 backup.py --test-transfer
 ```
 
 ## Otomasyon (Crontab Kurulumu)
