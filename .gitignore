@@ -1,0 +1,7 @@
+session.text
+__pycache__/
+expdp/
+history/
+*.log
+*.bak*
+*.swp

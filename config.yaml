@@ -1,0 +1,55 @@
+ORACLE_CONFIG:
+  ORACLE_HOSTNAME: "tr-db-ora1.imperial.local"
+  ORACLE_UNQNAME: "IMP"
+  ORACLE_BASE: "/u01/app/oracle"
+  ORACLE_HOME: "/u01/app/oracle/product/19.0.0/db_1"
+  ORACLE_SID: "IMP"
+  ORACLE_TERM: "xterm"
+  NLS_DATE_FORMAT: "DD-MON-YYYY HH24:MI:SS"
+
+GI_CONFIG:
+  GI_ENABLED: True
+  GRID_HOME: "/u01/app/19/grid"
+
+BACKUP_CONFIG:
+  backup_root: "/backup"
+  log_dir: "/backup/huaris/logs"
+  pid_file: "/tmp/rman_backup_IMP.pid"
+  history_dir: "/backup/huaris/history"
+  fallback_size_gb: 300
+  space_buffer_pct: 0.20
+  keep_days: 7
+  remote_dest: "oracle@192.168.210.124:/share/oracle"
+  transfer_method: "scp" # "rsync" or "scp"
+  transfer_hours: [20]
+  spfile_backup: False
+  validate_backup: False
+  parallelism: 8
+
+MAIL_CONFIG:
+  enabled: True
+  use_auth: True
+  notification_level: "INFO" # INFO, WARNING, ERROR
+  smtp_host: "smtp.office365.com"
+  smtp_port: 587
+  smtp_user: "noreply@huaristech.com"
+  use_tls: True
+  from_addr: "noreply@huaristech.com"
+  to_addrs: 
+    - "backup-report@huaristech.com"
+    - "onuralkan@imperialhastanesi.com"
+  subject_prefix: "[RMAN BACKUP]"
+  daily_mail_hour: 23
+
+VAULT_CONFIG:
+  enabled: True
+  url: "http://127.0.0.1:8200"
+  token: "hvs.your-vault-token-here"
+  secret_path: "secret/data/mail"
+
+MONITORING_CONFIG:
+  enabled: False
+  type: "prometheus" # or "zabbix"
+  pushgateway_url: "http://127.0.0.1:9091/metrics/job/oracle_backup"
+  zabbix_server: "127.0.0.1"
+  zabbix_host: "tr-db-ora1.imperial.local"
