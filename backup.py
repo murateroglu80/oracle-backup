@@ -760,6 +760,11 @@ QUIT;
                     else:
                         archivelog_deletion_cmd = f"DELETE NOPROMPT ARCHIVELOG ALL COMPLETED BEFORE 'SYSDATE-{ret_days}' BACKED UP 1 TIMES TO DISK;"
 
+                    # If neither database nor archivelogs are being backed up, fallback to parallelism 1
+                    if not RMAN_TEMPLATE.get("full_backup", True) and not RMAN_TEMPLATE.get("archive_backup", True):
+                        logger.info("Only controlfile/SPFILE backup requested. Forcing parallelism to 1.")
+                        parallelism = 1
+
                     # Build channel allocation
                     allocate_cmds = ""
                     release_cmds = ""
