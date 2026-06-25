@@ -31,6 +31,7 @@ BACKUP_CONFIG:
   transfer_hours: [20] # List of hours like [20, 23], or "all" to transfer on every run
   spfile_backup: False
   validate_backup: False
+  archive_retention_days: 2
   device_type: "DISK" # DISK or SBT_TAPE
   parallelism: 8
   rman_script_file: "backup.rman" # Optional custom RMAN script file
@@ -57,7 +58,7 @@ VAULT_CONFIG:
   secret_path: "secret/data/mail"
 
 MONITORING_CONFIG:
-  enabled: False
+  enabled: True
   type: "prometheus" # or "zabbix"
   pushgateway_url: "http://127.0.0.1:9091/metrics/job/oracle_backup"
   zabbix_server: "127.0.0.1"

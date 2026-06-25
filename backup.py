@@ -737,29 +737,54 @@ QUIT;
 """
                 else:
                     has_standby = check_standby_exists(logger, env, ssh_client)
+                    ret_days = BACKUP_CONFIG.get("archive_retention_days", 2)
                     if has_standby:
-                        archivelog_deletion_cmd = "DELETE NOPROMPT ARCHIVELOG ALL BACKED UP 1 TIMES TO DISK AND APPLIED ON ALL STANDBY;"
+                        archivelog_deletion_cmd = f"DELETE NOPROMPT ARCHIVELOG ALL COMPLETED BEFORE 'SYSDATE-{ret_days}' BACKED UP 1 TIMES TO DISK AND APPLIED ON ALL STANDBY;"
                     else:
-                        archivelog_deletion_cmd = "DELETE NOPROMPT ARCHIVELOG ALL BACKED UP 1 TIMES TO DISK;"
+                        archivelog_deletion_cmd = f"DELETE NOPROMPT ARCHIVELOG ALL COMPLETED BEFORE 'SYSDATE-{ret_days}' BACKED UP 1 TIMES TO DISK;"
+
+                    allocate_cmds = ""
+                    release_cmds = ""
+                    for i in range(1, parallelism + 1):
+                        allocate_cmds += f"  ALLOCATE CHANNEL c{i} TYPE {device_type};\n"
+                        release_cmds += f"  RELEASE CHANNEL c{i};\n"
 
                     rman_script = f"""
-CROSSCHECK BACKUP;
-CROSSCHECK ARCHIVELOG ALL;
-DELETE NOPROMPT EXPIRED ARCHIVELOG ALL;
-SQL 'ALTER SYSTEM ARCHIVE LOG CURRENT';
-CONFIGURE CONTROLFILE AUTOBACKUP ON;
-CONFIGURE CONTROLFILE AUTOBACKUP FORMAT FOR DEVICE TYPE {device_type} TO '{full_path}/ora_cf%F';
-CONFIGURE SNAPSHOT CONTROLFILE NAME TO '{full_path}/snapcf_{oracle_sid}_{file_name}.f';
-CONFIGURE DEVICE TYPE {device_type} PARALLELISM {parallelism};
-BACKUP AS COMPRESSED BACKUPSET FULL DATABASE
-  TAG 'DATABASE_{file_name}'
-  FORMAT '{full_path}/data_%d_%I_%s_%T_%U.rman'
-  PLUS ARCHIVELOG
-  TAG 'ARCHIVELOG_{file_name}'
-  FORMAT '{full_path}/arch_%d_%I_%s_%T_%U.arch';
-BACKUP AS COMPRESSED BACKUPSET CURRENT CONTROLFILE
-  FORMAT '{full_path}/controlfile_{file_name}';
-{archivelog_deletion_cmd}
+RUN {{
+{allocate_cmds}
+  BACKUP AS COMPRESSED BACKUPSET FULL DATABASE 
+    TAG 'DATABASE_{file_name}' 
+    FORMAT '{full_path}/Data_%d_%I_%s_%T_%U.rman';
+    
+  SQL 'ALTER SYSTEM ARCHIVE LOG CURRENT';
+  
+  BACKUP AS COMPRESSED BACKUPSET 
+    TAG 'ARCHIVELOG_{file_name}' 
+    FORMAT '{full_path}/ARCH_%d_%I_%s_%T_%U.arch' 
+    ARCHIVELOG ALL;
+    
+  BACKUP AS COMPRESSED BACKUPSET CURRENT CONTROLFILE 
+    TAG 'CONTROLFILE_{file_name}' 
+    FORMAT '{full_path}/CTL_%d_%T_%s_%p_ctlb';
+
+  DELETE NOPROMPT OBSOLETE RECOVERY WINDOW OF 1 DAYS;
+  CROSSCHECK ARCHIVELOG ALL;
+  CROSSCHECK BACKUP OF ARCHIVELOG ALL;
+  REPORT OBSOLETE ORPHAN;
+  REPORT OBSOLETE;
+  DELETE NOPROMPT EXPIRED ARCHIVELOG ALL;
+  DELETE NOPROMPT EXPIRED BACKUP OF CONTROLFILE;
+  DELETE FORCE NOPROMPT OBSOLETE ORPHAN;
+  DELETE FORCE NOPROMPT OBSOLETE;
+  {archivelog_deletion_cmd}
+  
+  LIST BACKUP SUMMARY;
+  
+  BACKUP SPFILE 
+    TAG 'SPFILE_{file_name}' 
+    FORMAT '{full_path}/Spfile_%d_%I_%s_%T_%U.rman';
+
+{release_cmds}}}
 QUIT;
 """
             if dry_run:
