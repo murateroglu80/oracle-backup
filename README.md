@@ -50,6 +50,29 @@ Bu Python betiği, Oracle veritabanları için gelişmiş RMAN yedekleme otomasy
   - `transfer_hours`: Transfer saati veya her çalışmada transfer için `"all"`.
 - **MAIL_CONFIG** ve **VAULT_CONFIG**: E-posta ve şifre kasası ayarları.
 
+### En İyi Uygulama (Best Practice): RMAN Şablonu
+
+Sorunsuz, güvenli ve disk şişmesini engelleyen standart bir üretim (production) yedekleme senaryosu için `config.yaml` içindeki `RMAN_TEMPLATE` ayarlarının şu şekilde yapılandırılması önerilir:
+
+```yaml
+RMAN_TEMPLATE:
+  full_backup: True           # Veritabanının tamamını (datafile) yedekler
+  archive_backup: True        # Point-in-time recovery için çok kritiktir
+  controlfile_backup: True    # Veritabanının fiziksel haritasını yedekler
+  spfile_backup: True         # Oracle konfigürasyon (parametre) ayarlarını yedekler
+  cleanup:
+    delete_obsolete: True              # recovery_window_days'den eski yedekleri siler
+    recovery_window_days: 1            # Kaç günlük yedek geriye dönük tutulacak (Yer kısıtlıysa 1)
+    crosscheck_archivelog: True        # İşletim sisteminden manuel silinmiş archivelog hatalarını önler
+    crosscheck_backup: True            # Kayıp yedek parçalarını kontrol eder
+    report_obsolete: True              # Loglara nelerin eski/gereksiz olduğunu yazar
+    delete_expired_archivelog: True    # Fiziksel olarak kayıp log kayıtlarını temizler
+    delete_expired_controlfile: True   # Eski kontrol dosyası kalıntılarını temizler
+    delete_obsolete_orphan: True       # İşe yaramayan yetim yedek parçalarını siler
+    archive_retention_days: 2          # Archivelogların diskte en az kaç gün tutulacağını belirler
+```
+Bu konfigürasyon, sistemi kendi haline bıraktığınızda "kendi kendini temizleyen ve sürekli güncel kalan" sağlam bir yedekleme döngüsü oluşturur.
+
 ## Güvenlik ve SSH Yetkilendirmesi (Passwordless SSH)
 Eğer `TARGET_SERVER.enabled: True` kullanıyorsanız, Jump Server'ın hedef Oracle sunucusuna şifre girmeden bağlanabilmesi için SSH anahtarı oluşturup hedef sunucuya kopyalamanız gerekir:
 ```bash
