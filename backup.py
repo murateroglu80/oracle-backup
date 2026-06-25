@@ -778,13 +778,13 @@ RUN {{
   DELETE FORCE NOPROMPT OBSOLETE;
   {archivelog_deletion_cmd}
   
-  LIST BACKUP SUMMARY;
-  
   BACKUP SPFILE 
     TAG 'SPFILE_{file_name}' 
     FORMAT '{full_path}/Spfile_%d_%I_%s_%T_%U.rman';
 
 {release_cmds}}}
+
+LIST BACKUP SUMMARY;
 QUIT;
 """
             if dry_run:
