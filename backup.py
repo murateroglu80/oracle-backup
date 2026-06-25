@@ -506,7 +506,7 @@ def mark_history_deleted(history_dir, deleted_dir_path):
     except Exception:
         pass
 
-def send_daily_summary(history_dir, mail_config, smtp_password, logger, target_date=None):
+def send_daily_summary(history_dir, mail_config, smtp_password, logger, target_date=None, target_server=None, oracle_config=None, backup_config=None):
     h_file = get_history_file(history_dir)
     if not os.path.exists(h_file):
         return
@@ -544,6 +544,7 @@ def send_daily_summary(history_dir, mail_config, smtp_password, logger, target_d
         color = "#005500"
         if run_severity == "WARNING": color = "#856404"
         if run_severity == "ERROR": color = "#cc0000"
+        row_color = "#f8f9fa" if run_status == "SUCCESS" else "#f8d7da"
         
         details = run.get('errors_warnings', '-')
         if run.get("remote_backup"):
@@ -552,40 +553,97 @@ def send_daily_summary(history_dir, mail_config, smtp_password, logger, target_d
             if run.get("transfer_speed_mbps"):
                 details += f" ({run.get('transfer_speed_mbps')} MB/s)"
 
-        html_rows += f"""<tr>
-            <td>{run.get('operation', 'Backup')}</td>
-            <td>{run.get('start_time', run.get('run_time', '-'))}</td>
-            <td>{run.get('end_time', '-')}</td>
-            <td>{run.get('duration', '-')}</td>
-            <td>{run.get('size_gb', '0')}</td>
-            <td style='color:{color}; font-weight:bold;'>{run_status}</td>
-            <td>{details}</td>
-        </tr>"""
+        html_rows += f"""
+        <tr style="background-color: {row_color}; border-bottom: 1px solid #eee; font-size: 11px;">
+            <td style="padding: 8px; text-align: left;">{run.get('operation', 'Backup')}</td>
+            <td style="padding: 8px; text-align: left;">{run.get('start_time', run.get('run_time', '-'))} - {run.get('end_time', '-')}</td>
+            <td style="padding: 8px; text-align: right;">{run.get('duration', '-')}</td>
+            <td style="padding: 8px; text-align: right;">{run.get('size_gb', '0')} GB</td>
+            <td style="padding: 8px; text-align: center; font-weight: bold; color: {color};">{run_status}</td>
+            <td style="padding: 8px; text-align: left; color: #666;">{details}</td>
+        </tr>
+        """
 
     if max_day_severity < min_severity_score:
         logger.info(f"Day max severity ({max_day_severity}) below notification level ({min_severity_score}). Skipping mail.")
         return
 
     final_severity_label = "INFO"
-    if max_day_severity == 2: final_severity_label = "WARNING"
-    if max_day_severity == 3: final_severity_label = "ERROR"
+    overall_status = "ALL OK"
+    status_color = "#28a745" # Green
+    
+    if max_day_severity == 2: 
+        final_severity_label = "WARNING"
+        overall_status = "WARNING / PARTIAL"
+        status_color = "#ffc107" # Yellow
+    elif max_day_severity == 3: 
+        final_severity_label = "ERROR"
+        overall_status = "ERROR / FAILED"
+        status_color = "#dc3545" # Red
 
     subject = f"{mail_config['subject_prefix']} [{final_severity_label}] Daily Summary | {target_date}"
+    
+    # Extract info safely
+    oracle_sid = oracle_config.get("oracle_sid", "N/A") if oracle_config else "N/A"
+    db_name = oracle_config.get("db_name", oracle_sid) if oracle_config else "N/A"
+    transfer_target = target_server.get("host", "None") if target_server else "None"
+    
+    import socket
+    local_host = socket.gethostname()
 
-    html_body = f"""<html>
-    <body style="font-family:sans-serif; background:#f4f4f4; padding:20px;">
-      <h2 style="color:{'#005500' if max_day_severity==1 else ('#856404' if max_day_severity==2 else '#cc0000')};">
-        RMAN Daily Backup Summary - {final_severity_label}
-      </h2>
-      <table border="1" cellpadding="8" cellspacing="0" style="background:#fff; width:100%; border-collapse:collapse; font-size:13px;">
-        <tr style="background:#f8f9fa;">
-          <th>Operation</th><th>Start</th><th>End</th><th>Duration</th><th>Size (GB)</th><th>Status</th><th>Details</th>
-        </tr>
-        {html_rows}
-      </table>
-      <p style="font-size:11px; color:#666; margin-top:20px;">Notification Level: {notification_level} | Generated at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
+    success_count = sum(1 for r in day_runs if r.get('status', '').upper() == 'SUCCESS')
+    total_count = len(day_runs)
+
+    html_body = f"""
+    <html>
+    <body style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; color: #333; line-height: 1.6;">
+        <div style="max-width: 950px; margin: 0 auto; border: 1px solid #ddd; border-radius: 8px; overflow: hidden;">
+            <div style="background-color: {status_color}; color: white; padding: 20px; text-align: center;">
+                <h2 style="margin: 0;">Oracle RMAN Backup Summary</h2>
+                <p style="margin: 5px 0 0 0;">Status: {overall_status} | Server: {local_host} | DB: {db_name}</p>
+            </div>
+            
+            <div style="padding: 20px;">
+                <table style="width: 100%; border-collapse: collapse; margin-bottom: 20px;">
+                    <tr>
+                        <td style="width: 50%; padding: 10px; background: #f4f4f4;"><strong>Date:</strong> {target_date}</td>
+                        <td style="width: 50%; padding: 10px; background: #f4f4f4;"><strong>Local Hostname:</strong> {local_host}</td>
+                    </tr>
+                    <tr>
+                        <td style="padding: 10px;"><strong>Oracle SID:</strong> {oracle_sid}</td>
+                        <td style="padding: 10px;"><strong>Transfer Target:</strong> {transfer_target}</td>
+                    </tr>
+                </table>
+
+                <h3 style="border-bottom: 2px solid #eee; padding-bottom: 10px; color: #555;">Execution Details</h3>
+                <table style="width: 100%; border-collapse: collapse;">
+                    <thead>
+                        <tr style="background-color: #343a40; color: white;">
+                            <th style="padding: 12px; text-align: left;">Operation</th>
+                            <th style="padding: 12px; text-align: left;">Time (Start - End)</th>
+                            <th style="padding: 12px; text-align: right;">Duration</th>
+                            <th style="padding: 12px; text-align: right;">Size</th>
+                            <th style="padding: 12px; text-align: center;">Status</th>
+                            <th style="padding: 12px; text-align: left;">Details / Message</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {html_rows}
+                    </tbody>
+                </table>
+                
+                <div style="margin-top: 20px; font-size: 0.9em; color: #777; border-top: 1px solid #eee; padding-top: 10px;">
+                    Daily Overview: {success_count} Success / {total_count} Total runs today.<br>
+                    Notification Level: {notification_level}
+                </div>
+            </div>
+            <div style="background-color: #f4f4f4; padding: 10px; text-align: center; font-size: 0.8em; color: #999;">
+                This is an automated RMAN report generated at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}.
+            </div>
+        </div>
     </body>
-    </html>"""
+    </html>
+    """
 
     msg = MIMEMultipart("alternative")
     msg["Subject"] = Header(subject, "utf-8")
@@ -1004,7 +1062,7 @@ QUIT;
                 else:
                     smtp_password = MAIL_CONFIG.get("smtp_password")
             report_date = backup_start.strftime("%Y-%m-%d")
-            send_daily_summary(history_dir, MAIL_CONFIG, smtp_password, logger, target_date=report_date)
+            send_daily_summary(history_dir, MAIL_CONFIG, smtp_password, logger, target_date=report_date, target_server=TARGET_SERVER, oracle_config=ORACLE_CONFIG, backup_config=BACKUP_CONFIG)
 
         if error_msg:
             sys.exit(1)
