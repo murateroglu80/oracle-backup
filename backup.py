@@ -30,18 +30,8 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.header import Header
 
-try:
-    import hvac
-except ImportError:
-    print("[ERROR] 'hvac' library is missing. Install it using 'pip install hvac'")
-    sys.exit(1)
-
-try:
-    import paramiko
-except ImportError:
-    print("[ERROR] 'paramiko' library is missing. Install it using 'pip install paramiko'")
-    sys.exit(1)
-
+import hvac
+import paramiko
 def load_config(config_path="config.yaml"):
     script_dir = os.path.dirname(os.path.abspath(__file__))
     full_path = os.path.join(script_dir, config_path)
