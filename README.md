@@ -86,3 +86,6 @@ Aşağıdaki satırı ekleyin:
 ```bash
 0 * * * * /path/to/oracle-backup/run.sh >> /tmp/oracle_backup_cron.log 2>&1
 ```
+
+## Yapılacaklar (TODO) & Gelecek Planları
+* **SolarWinds Monitoring Entegrasyonu:** Yedekleme metriklerinin Zabbix/Prometheus'a ek olarak SolarWinds API üzerinden (SWIS REST API veya SNMP ile) SolarWinds sistemine aktarılması (Planlandı, geliştirilecek).
