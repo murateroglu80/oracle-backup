@@ -12,6 +12,7 @@ GI_CONFIG:
   GRID_HOME: "/u01/app/19/grid"
 
 TARGET_SERVER:
+  enabled: True
   host: "tr-db-ora1.imperial.local"
   user: "oracle"
   port: 22
@@ -19,9 +20,9 @@ TARGET_SERVER:
 
 BACKUP_CONFIG:
   backup_root: "/backup"
-  log_dir: "/backup/huaris/logs"
+  log_dir: "~/huaris/logs"
   pid_file: "/tmp/rman_backup_IMP.pid"
-  history_dir: "/backup/huaris/history"
+  history_dir: "~/huaris/history"
   fallback_size_gb: 300
   space_buffer_pct: 0.20
   keep_days: 7
@@ -30,7 +31,9 @@ BACKUP_CONFIG:
   transfer_hours: [20] # List of hours like [20, 23], or "all" to transfer on every run
   spfile_backup: False
   validate_backup: False
+  device_type: "DISK" # DISK or SBT_TAPE
   parallelism: 8
+  rman_script_file: "backup.rman" # Optional custom RMAN script file
 
 MAIL_CONFIG:
   enabled: True

@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Oracle RMAN Backup Script - v6.0.0 (Jump Server Edition)
+Oracle RMAN Backup Script - v6.1.0 (Hybrid Jump/Local Server Edition)
 Advanced Refactoring:
   1. Persistent Backup History with Monthly Rotation (JSON database).
-  2. Centralized Jump Server Execution (Paramiko SSH).
-  3. Deletion Tracking (is_deleted: true in JSON).
-  4. Dynamic Data Guard Applied-On-Standby checks via sqlplus over SSH.
-  5. HashiCorp Vault Integration for SMTP Password.
-  6. External config.yaml configuration.
+  2. Centralized Jump Server Execution (Paramiko SSH) or Local Execution (Subprocess).
+  3. Dynamic Log Generation & Safe SFTP Transfer.
+  4. RMAN Exit Code visibility (Fail-Fast mechanism) + Regex ORA-/RMAN- scans.
+  5. Custom `.rman` script parsing capability.
+  6. Device Type (SBT/DISK) and Parallelism Configuration.
+  7. Auto-creation of configurable log/history directories (Defaults to ~/huaris/).
+  8. HashiCorp Vault Integration for SMTP Password.
 """
 
 import os
@@ -22,6 +24,7 @@ import smtplib
 import json
 import yaml
 import requests
+import re
 from datetime import datetime, timedelta
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -56,7 +59,7 @@ def load_config(config_path="config.yaml"):
         sys.exit(1)
 
 # ============================================================
-# 1. SSH MANAGER & REMOTE EXECUTION
+# 1. COMMAND EXECUTION (SSH & LOCAL)
 # ============================================================
 
 def get_ssh_client(ssh_config, logger):
@@ -76,7 +79,7 @@ def get_ssh_client(ssh_config, logger):
         logger.error(f"SSH connection failed: {e}")
         sys.exit(1)
 
-def run_remote_command(ssh_client, cmd, logger, env_dict=None, timeout=None, quiet=False):
+def run_command_wrapper(ssh_client, cmd, logger, env_dict=None, timeout=None, quiet=False):
     env_prefix = ""
     if env_dict:
         for k, v in env_dict.items():
@@ -84,12 +87,18 @@ def run_remote_command(ssh_client, cmd, logger, env_dict=None, timeout=None, qui
     full_cmd = env_prefix + cmd
     
     if not quiet and logger:
-        logger.debug(f"[REMOTE CMD] {cmd}")
+        logger.debug(f"[CMD] {cmd}")
         
-    stdin, stdout, stderr = ssh_client.exec_command(full_cmd, timeout=timeout)
-    out = stdout.read().decode('utf-8')
-    err = stderr.read().decode('utf-8')
-    status = stdout.channel.recv_exit_status()
+    if ssh_client:
+        stdin, stdout, stderr = ssh_client.exec_command(full_cmd, timeout=timeout)
+        out = stdout.read().decode('utf-8', errors='ignore')
+        err = stderr.read().decode('utf-8', errors='ignore')
+        status = stdout.channel.recv_exit_status()
+    else:
+        proc = subprocess.run(full_cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, executable='/bin/bash')
+        out = proc.stdout.decode('utf-8', errors='ignore')
+        err = proc.stderr.decode('utf-8', errors='ignore')
+        status = proc.returncode
     
     if not quiet and logger:
         for line in out.splitlines():
@@ -151,7 +160,7 @@ def get_vault_secret(vault_config, logger):
         sys.exit(1)
 
 # ============================================================
-# 4. PROCESS LOCK (Lokal Jump Server)
+# 4. PROCESS LOCK
 # ============================================================
 
 def acquire_lock(pid_file, retries=3, wait=30):
@@ -192,11 +201,11 @@ def release_lock(pid_file):
         pass
 
 # ============================================================
-# 5. DISK SPACE MANAGEMENT (Uzak Sunucu)
+# 5. DISK SPACE MANAGEMENT
 # ============================================================
 
 def get_free_gb(ssh_client, path):
-    status, out, err = run_remote_command(ssh_client, f"df -k {path} | awk 'NR==2 {{print $4}}'", None, quiet=True)
+    status, out, err = run_command_wrapper(ssh_client, f"df -k {path} | awk 'NR==2 {{print $4}}'", None, quiet=True)
     try:
         kb = int(out.strip())
         return kb / (1024 ** 2)
@@ -204,7 +213,7 @@ def get_free_gb(ssh_client, path):
         return 0
 
 def get_dir_size_gb(ssh_client, path):
-    status, out, err = run_remote_command(ssh_client, f"du -sk {path} | awk '{{print $1}}'", None, quiet=True)
+    status, out, err = run_command_wrapper(ssh_client, f"du -sk {path} | awk '{{print $1}}'", None, quiet=True)
     try:
         kb = int(out.strip())
         return kb / (1024 ** 2)
@@ -212,9 +221,7 @@ def get_dir_size_gb(ssh_client, path):
         return 0
 
 def list_daily_dirs(ssh_client, backup_root):
-    # Lists directories inside backup_root except "logs"
-    # Format: path|ctime
-    status, out, err = run_remote_command(ssh_client, f"find {backup_root} -mindepth 1 -maxdepth 1 -type d -not -name 'logs' -printf '%p|%C@\n'", None, quiet=True)
+    status, out, err = run_command_wrapper(ssh_client, f"find {backup_root} -mindepth 1 -maxdepth 1 -type d -not -name 'logs' -printf '%p|%C@\n'", None, quiet=True)
     dirs = []
     for line in out.splitlines():
         if "|" in line:
@@ -259,12 +266,12 @@ def ensure_free_space(logger, ssh_client, env, backup_config):
     required_gb = get_required_gb(logger, backup_config)
     free_gb     = get_free_gb(ssh_client, backup_root)
 
-    logger.info(f"Free disk space on remote : {free_gb:.1f} GB  |  Required : {required_gb:.1f} GB")
+    logger.info(f"Free disk space on target : {free_gb:.1f} GB  |  Required : {required_gb:.1f} GB")
 
     if free_gb >= required_gb:
         return True, free_gb, required_gb
 
-    logger.warning("Insufficient disk space! Removing oldest backup dirs from remote...")
+    logger.warning("Insufficient disk space! Removing oldest backup dirs from target...")
 
     daily_dirs = list_daily_dirs(ssh_client, backup_root)
     for old_dir in daily_dirs:
@@ -276,7 +283,7 @@ def ensure_free_space(logger, ssh_client, env, backup_config):
         except RuntimeError:
             pass
 
-        run_remote_command(ssh_client, f"rm -rf {old_dir}", logger)
+        run_command_wrapper(ssh_client, f"rm -rf {old_dir}", logger)
         logger.info(f"Removed directory for space: {old_dir}")
         mark_history_deleted(history_dir, old_dir)
         
@@ -289,7 +296,7 @@ def ensure_free_space(logger, ssh_client, env, backup_config):
     return True, free_gb, required_gb
 
 # ============================================================
-# 6. RMAN, RSYNC & ORACLE UTILS (Uzak Sunucu)
+# 6. RMAN, RSYNC & ORACLE UTILS
 # ============================================================
 
 def format_duration(seconds):
@@ -303,7 +310,7 @@ def check_standby_exists(logger, env, ssh_client):
     logger.info("Checking for Data Guard Standby existence via sqlplus...")
     sql = "SET HEADING OFF FEEDBACK OFF PAGESIZE 0\nSELECT COUNT(*) FROM v$archive_dest WHERE target='STANDBY' AND destination IS NOT NULL;\nEXIT;\n"
     cmd = f"echo \"{sql}\" | sqlplus -s / as sysdba"
-    status, out, err = run_remote_command(ssh_client, cmd, logger, env_dict=env, timeout=30, quiet=True)
+    status, out, err = run_command_wrapper(ssh_client, cmd, logger, env_dict=env, timeout=30, quiet=True)
     if status == 0:
         try:
             count = int(out.strip())
@@ -316,25 +323,43 @@ def check_standby_exists(logger, env, ssh_client):
 
 def run_rman(logger, env, ssh_client, rman_script, label="rman"):
     start = time.time()
-    # Write script to a temp file remotely, run it, then delete it
     script_escaped = rman_script.replace('$', '\\$').replace('`', '\\`')
-    cmd = f"cat << 'EOF' > /tmp/rman_script_$$.rman\n{script_escaped}\nEOF\nrman target / @/tmp/rman_script_$$.rman\nrm -f /tmp/rman_script_$$.rman"
-    status, out, err = run_remote_command(ssh_client, cmd, logger, env_dict=env, timeout=7200)
+    # Fail-Fast wrapper: Preserve RC
+    cmd = f"""cat << 'EOF' > /tmp/rman_script_$$.rman
+{script_escaped}
+EOF
+rman target / @/tmp/rman_script_$$.rman
+RC=$?
+rm -f /tmp/rman_script_$$.rman
+exit $RC"""
+    
+    status, out, err = run_command_wrapper(ssh_client, cmd, logger, env_dict=env, timeout=7200)
     elapsed = time.time() - start
     
-    if status != 0:
-        raise RuntimeError(f"RMAN {label} failed (rc={status})")
+    # Check explicitly for RMAN/ORA errors in output even if RC=0
+    error_pattern = re.compile(r'(RMAN-\d+|ORA-\d+)')
+    found_error = False
+    
+    for line in (out + "\n" + err).splitlines():
+        if error_pattern.search(line):
+            if "RMAN-00571" in line or "RMAN-00569" in line or "Recovery Manager complete" in line:
+                continue
+            found_error = True
+            break
+            
+    if found_error or status != 0:
+        raise RuntimeError(f"RMAN {label} failed (rc={status}). See logs for ORA-/RMAN- errors.")
 
     return elapsed, out
 
 def run_rsync(logger, ssh_client, source_dir, remote_dest, max_retries=3, timeout=28800):
     cmd = f"rsync -avz --progress --stats --partial {source_dir} {remote_dest}"
-    logger.info(f"rsync starting (remote execution): {source_dir} --> {remote_dest}")
+    logger.info(f"rsync starting: {source_dir} --> {remote_dest}")
     
     overall_start = time.time()
     for attempt in range(1, max_retries + 1):
         start = time.time()
-        status, out, err = run_remote_command(ssh_client, cmd, logger, timeout=timeout)
+        status, out, err = run_command_wrapper(ssh_client, cmd, logger, timeout=timeout)
         total_elapsed = time.time() - overall_start
 
         if status == 0:
@@ -361,12 +386,12 @@ def run_rsync(logger, ssh_client, source_dir, remote_dest, max_retries=3, timeou
 
 def run_scp(logger, ssh_client, source_dir, remote_dest, max_retries=3, timeout=28800):
     cmd = f"scp -r {source_dir} {remote_dest}"
-    logger.info(f"scp starting (remote execution): {source_dir} --> {remote_dest}")
+    logger.info(f"scp starting: {source_dir} --> {remote_dest}")
     
     overall_start = time.time()
     for attempt in range(1, max_retries + 1):
         start = time.time()
-        status, out, err = run_remote_command(ssh_client, cmd, logger, timeout=timeout)
+        status, out, err = run_command_wrapper(ssh_client, cmd, logger, timeout=timeout)
         total_elapsed = time.time() - overall_start
 
         if status == 0:
@@ -421,7 +446,7 @@ def push_metrics(logger, monitoring_config, oracle_sid, elapsed, free_gb, requir
             logger.warning(f"Failed to push metrics to Zabbix: {e}")
 
 # ============================================================
-# 8. PERSISTENT HISTORY MANAGEMENT (Lokal)
+# 8. PERSISTENT HISTORY MANAGEMENT
 # ============================================================
 
 def get_history_file(history_dir, date_obj=None):
@@ -580,23 +605,41 @@ def send_daily_summary(history_dir, mail_config, smtp_password, logger, target_d
 
 def main(dry_run=False, test_mail=False, test_transfer=False):
     config = load_config("config.yaml")
-    TARGET_SERVER = config.get("TARGET_SERVER")
-    ORACLE_CONFIG = config["ORACLE_CONFIG"]
-    BACKUP_CONFIG = config["BACKUP_CONFIG"]
-    MAIL_CONFIG = config["MAIL_CONFIG"]
-    VAULT_CONFIG = config["VAULT_CONFIG"]
+    TARGET_SERVER = config.get("TARGET_SERVER", {})
+    ORACLE_CONFIG = config.get("ORACLE_CONFIG", {})
+    BACKUP_CONFIG = config.get("BACKUP_CONFIG", {})
+    MAIL_CONFIG = config.get("MAIL_CONFIG", {})
+    VAULT_CONFIG = config.get("VAULT_CONFIG", {})
     MONITORING_CONFIG = config.get("MONITORING_CONFIG", {})
 
-    if not TARGET_SERVER:
-        print("[ERROR] TARGET_SERVER configuration missing in config.yaml")
-        sys.exit(1)
-
-    logger = setup_logging(BACKUP_CONFIG["log_dir"] + "/backup_test.log" if (dry_run or test_transfer) else BACKUP_CONFIG["log_dir"] + "/backup_latest.log")
+    # Auto-resolve ~ and setup local dirs
+    log_dir = os.path.expanduser(BACKUP_CONFIG.get("log_dir", "~/huaris/logs"))
+    history_dir = os.path.expanduser(BACKUP_CONFIG.get("history_dir", "~/huaris/history"))
+    pid_file = os.path.expanduser(BACKUP_CONFIG.get("pid_file", "/tmp/rman_backup.pid"))
     
-    if dry_run:
-        logger.info("=== STARTING IN DRY-RUN MODE ===")
-    if test_transfer:
-        logger.info("=== STARTING TEST TRANSFER MODE ===")
+    os.makedirs(log_dir, exist_ok=True)
+    os.makedirs(history_dir, exist_ok=True)
+
+    now  = datetime.now()
+    hour = now.hour
+    day_name  = now.strftime("%d%b%Y").upper()
+    file_name = now.strftime("%d%b%y%H").upper()
+    
+    log_file = os.path.join(log_dir, f"backup_{file_name}.log")
+
+    if dry_run or test_transfer:
+        logger = setup_logging(os.path.join(log_dir, "backup_test.log"))
+    else:
+        logger = setup_logging(log_file)
+        latest_link = os.path.join(log_dir, "backup_latest.log")
+        try:
+            if os.path.exists(latest_link) or os.path.islink(latest_link):
+                os.remove(latest_link)
+            os.symlink(log_file, latest_link)
+        except: pass
+    
+    if dry_run: logger.info("=== STARTING IN DRY-RUN MODE ===")
+    if test_transfer: logger.info("=== STARTING TEST TRANSFER MODE ===")
     
     if test_mail:
         logger.info("=== STARTING TEST MAIL ===")
@@ -628,47 +671,35 @@ def main(dry_run=False, test_mail=False, test_transfer=False):
             logger.info("Mail is disabled in config.")
         return
 
-    # LOCAL Dirs (Jump Server)
-    log_dir = BACKUP_CONFIG["log_dir"]
-    history_dir = BACKUP_CONFIG.get("history_dir")
-    pid_file = BACKUP_CONFIG["pid_file"]
-
-    os.makedirs(log_dir, exist_ok=True)
-    os.makedirs(history_dir, exist_ok=True)
-
     locked, pid = acquire_lock(pid_file)
     if not locked:
-        logger.error("Another backup process is running on this jump server.")
+        logger.error("Another backup process is running.")
         sys.exit(2)
 
     ssh_client = None
     try:
-        ssh_client = get_ssh_client(TARGET_SERVER, logger)
-
-        now  = datetime.now()
-        hour = now.hour
-        day_name  = now.strftime("%d%b%Y").upper()
-        file_name = now.strftime("%d%b%y%H").upper()
+        target_enabled = TARGET_SERVER.get("enabled", False)
+        if target_enabled:
+            ssh_client = get_ssh_client(TARGET_SERVER, logger)
+        else:
+            logger.info("TARGET_SERVER is disabled. Running all commands LOCALLY.")
 
         daily_dir = os.path.join(BACKUP_CONFIG["backup_root"], day_name)
         full_path = os.path.join(daily_dir, f"{hour:02d}")
-        log_file  = os.path.join(log_dir, f"backup_{file_name}.log")
 
-        # Remote Dirs (DB Server)
         if not dry_run:
-            run_remote_command(ssh_client, f"mkdir -p {full_path}", logger)
+            run_command_wrapper(ssh_client, f"mkdir -p {full_path}", logger)
 
-        # Setup Remote Environment Variables
         env = {}
         for key, val in ORACLE_CONFIG.items():
             env[key] = str(val)
-        oh = ORACLE_CONFIG["ORACLE_HOME"]
+        oh = ORACLE_CONFIG.get("ORACLE_HOME", "")
         env["PATH"] = f"/usr/sbin:{oh}/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
         env["LD_LIBRARY_PATH"] = f"{oh}/lib:/lib:/usr/lib"
         env["CLASSPATH"] = f"{oh}/JRE:{oh}/jlib:{oh}/rdbms/jlib"
         env["TMP"] = "/tmp"
         env["TMPDIR"] = "/tmp"
-        oracle_sid = ORACLE_CONFIG["ORACLE_SID"]
+        oracle_sid = ORACLE_CONFIG.get("ORACLE_SID", "")
 
         error_msg = None
         backup_start = datetime.now()
@@ -677,35 +708,49 @@ def main(dry_run=False, test_mail=False, test_transfer=False):
         free_gb, required_gb = 0, 0
 
         try:
-            # STEP 1: Space Check (Remote)
+            # Space Check
             space_ok, free_gb, required_gb = ensure_free_space(logger, ssh_client, env, BACKUP_CONFIG)
             if not space_ok:
                 raise RuntimeError("Insufficient disk space on target server.")
 
-            # STEP 2: RMAN Backup (Remote)
+            # RMAN Backup
             parallelism = BACKUP_CONFIG.get("parallelism", 1)
-            has_standby = check_standby_exists(logger, env, ssh_client)
-            if has_standby:
-                archivelog_deletion_cmd = "DELETE NOPROMPT ARCHIVELOG ALL BACKED UP 1 TIMES TO DISK AND APPLIED ON ALL STANDBY;"
-            else:
-                archivelog_deletion_cmd = "DELETE NOPROMPT ARCHIVELOG ALL BACKED UP 1 TIMES TO DISK;"
+            device_type = BACKUP_CONFIG.get("device_type", "DISK").upper()
+            rman_script_file = BACKUP_CONFIG.get("rman_script_file")
+            
+            rman_script = None
+            if rman_script_file:
+                # Resolve path relative to script dir
+                if not os.path.isabs(rman_script_file):
+                    rman_script_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), rman_script_file)
+                if os.path.exists(rman_script_file):
+                    logger.info(f"Using custom RMAN script from: {rman_script_file}")
+                    with open(rman_script_file, "r") as f:
+                        rman_script = f.read()
 
-            if test_transfer:
-                rman_script = f"""
+            if not rman_script:
+                if test_transfer:
+                    rman_script = f"""
 BACKUP AS COMPRESSED BACKUPSET CURRENT CONTROLFILE
   FORMAT '{full_path}/controlfile_test_{file_name}';
 QUIT;
 """
-            else:
-                rman_script = f"""
+                else:
+                    has_standby = check_standby_exists(logger, env, ssh_client)
+                    if has_standby:
+                        archivelog_deletion_cmd = "DELETE NOPROMPT ARCHIVELOG ALL BACKED UP 1 TIMES TO DISK AND APPLIED ON ALL STANDBY;"
+                    else:
+                        archivelog_deletion_cmd = "DELETE NOPROMPT ARCHIVELOG ALL BACKED UP 1 TIMES TO DISK;"
+
+                    rman_script = f"""
 CROSSCHECK BACKUP;
 CROSSCHECK ARCHIVELOG ALL;
 DELETE NOPROMPT EXPIRED ARCHIVELOG ALL;
 SQL 'ALTER SYSTEM ARCHIVE LOG CURRENT';
 CONFIGURE CONTROLFILE AUTOBACKUP ON;
-CONFIGURE CONTROLFILE AUTOBACKUP FORMAT FOR DEVICE TYPE DISK TO '{full_path}/ora_cf%F';
+CONFIGURE CONTROLFILE AUTOBACKUP FORMAT FOR DEVICE TYPE {device_type} TO '{full_path}/ora_cf%F';
 CONFIGURE SNAPSHOT CONTROLFILE NAME TO '{full_path}/snapcf_{oracle_sid}_{file_name}.f';
-CONFIGURE DEVICE TYPE DISK PARALLELISM {parallelism};
+CONFIGURE DEVICE TYPE {device_type} PARALLELISM {parallelism};
 BACKUP AS COMPRESSED BACKUPSET FULL DATABASE
   TAG 'DATABASE_{file_name}'
   FORMAT '{full_path}/data_%d_%I_%s_%T_%U.rman'
@@ -729,7 +774,6 @@ QUIT;
         backup_elapsed = time.time() - overall_start
         success_status = "FAILED" if error_msg else "SUCCESS"
         
-        # Save Persistent History (Local Jump Server)
         history_record = {
             "run_time": backup_start.strftime("%Y-%m-%d %H:%M:%S"),
             "start_time": backup_start.strftime("%Y-%m-%d %H:%M:%S"),
@@ -750,21 +794,26 @@ QUIT;
         else:
             append_history(history_dir, history_record)
 
-        # Send local log to remote backup directory
+        # Transfer local log_file to remote DB server
         if not dry_run and not test_transfer and not error_msg:
             try:
-                sftp = ssh_client.open_sftp()
-                sftp.put(log_file, f"{full_path}/backup_{file_name}.log")
-                sftp.close()
+                if ssh_client:
+                    sftp = ssh_client.open_sftp()
+                    sftp.put(log_file, f"{full_path}/backup_{file_name}.log")
+                    sftp.close()
+                else:
+                    shutil.copy2(log_file, f"{full_path}/backup_{file_name}.log")
             except Exception as e:
-                logger.warning(f"Failed to SCP local log file to remote DB server: {e}")
+                logger.warning(f"Failed to copy local log file to DB server: {e}")
 
-        # STEP 3: Transfer (Rsync/SCP from DB server to remote_dest)
+        # Transfer Backup to final destination (remote_dest)
         transfer_triggered = False
         transfer_hours = BACKUP_CONFIG.get("transfer_hours", BACKUP_CONFIG.get("rsync_hours", []))
         transfer_method = BACKUP_CONFIG.get("transfer_method", "rsync").lower()
 
         is_transfer_hour = (transfer_hours == "all" or transfer_hours == ["all"] or (isinstance(transfer_hours, list) and hour in transfer_hours))
+        
+        # Only transfer if there was NO error
         if not error_msg and (is_transfer_hour or test_transfer):
             transfer_triggered = True
             transfer_start_time = datetime.now()
@@ -775,17 +824,16 @@ QUIT;
                 remote_full_dest = f"{BACKUP_CONFIG['remote_dest']}/{day_name}"
 
                 if dry_run:
-                    logger.info(f"[DRY-RUN] Would execute {transfer_method} from DB Server to {remote_full_dest}")
+                    logger.info(f"[DRY-RUN] Would execute {transfer_method} to {remote_full_dest}")
                     transfer_elapsed, avg_speed, attempts = 0.5, 100.0, 1
                 else:
+                    # Depending on local vs ssh_client, ssh might need -o StrictHostKeyChecking=no
+                    ssh_prefix = f"ssh -o StrictHostKeyChecking=no {remote_base} "
+                    run_command_wrapper(ssh_client, f"{ssh_prefix} mkdir -p {remote_path}/{day_name}", logger, quiet=True)
                     if transfer_method == "scp":
-                        # Run ssh mkdir from DB server to remote_dest
-                        run_remote_command(ssh_client, f"ssh -o StrictHostKeyChecking=no {remote_base} mkdir -p {remote_path}/{day_name}", logger, quiet=True)
-                        run_remote_command(ssh_client, f"ssh -o StrictHostKeyChecking=no {remote_base} cmd /c mkdir \"{remote_path}\\{day_name}\"", logger, quiet=True)
-                        
+                        run_command_wrapper(ssh_client, f"{ssh_prefix} cmd /c mkdir \"{remote_path}\\{day_name}\"", logger, quiet=True)
                         transfer_elapsed, avg_speed, attempts, _ = run_scp(logger, ssh_client, full_path, remote_full_dest)
                     else:
-                        run_remote_command(ssh_client, f"ssh -o StrictHostKeyChecking=no {remote_base} mkdir -p {remote_path}/{day_name}", logger, quiet=True)
                         transfer_elapsed, avg_speed, attempts, _ = run_rsync(logger, ssh_client, full_path, remote_full_dest)
                 
                 transfer_record = {
@@ -828,18 +876,18 @@ QUIT;
                     "deleted_at": None
                 })
 
-        # STEP 4: Routine Cleanup (Remote)
+        # Routine Cleanup
         keep_days = BACKUP_CONFIG.get("keep_days", 7)
         cutoff = time.time() - keep_days * 86400
         for bdir in list_daily_dirs(ssh_client, BACKUP_CONFIG["backup_root"]):
             if bdir == daily_dir:
                 continue
-            status, out, err = run_remote_command(ssh_client, f"stat -c %Y {bdir}", None, quiet=True)
+            status, out, err = run_command_wrapper(ssh_client, f"stat -c %Y {bdir}", None, quiet=True)
             try:
                 bdir_time = float(out.strip())
                 if bdir_time < cutoff:
-                    run_remote_command(ssh_client, f"rm -rf {bdir}", logger)
-                    logger.info(f"Routine cleanup: Removed remote directory {bdir}")
+                    run_command_wrapper(ssh_client, f"rm -rf {bdir}", logger)
+                    logger.info(f"Routine cleanup: Removed directory {bdir}")
                     mark_history_deleted(history_dir, bdir)
             except Exception:
                 pass
@@ -873,7 +921,7 @@ QUIT;
         release_lock(pid_file)
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Oracle RMAN Backup Script (Jump Server Edition)")
+    parser = argparse.ArgumentParser(description="Oracle RMAN Backup Script (Hybrid Jump/Local Server Edition)")
     parser.add_argument("--dry-run", action="store_true", help="Run the script without executing RMAN, Rsync/SCP, or modifying history.")
     parser.add_argument("--test-mail", action="store_true", help="Send a test email using the configured SMTP settings and exit.")
     parser.add_argument("--test-transfer", action="store_true", help="Run a quick backup of only the control file and transfer it via SCP/Rsync to test the remote connection.")

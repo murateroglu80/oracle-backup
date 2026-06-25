@@ -34,20 +34,24 @@ Bu Python betiği, Oracle veritabanları için gelişmiş RMAN yedekleme otomasy
 ## Yapılandırma (`config.yaml`)
 
 - **TARGET_SERVER**: Scriptin SSH ile bağlanıp yedekleme işlemlerini (RMAN) tetikleyeceği asıl Oracle veritabanı sunucusu.
+  - `enabled`: `True` ise işlemler SSH ile Jump Server üzerinden yürütülür. `False` ise script **doğrudan çalıştığı makinede (Lokal)** tüm işlemleri (SSH kullanmadan) gerçekleştirir.
   - `host`: Veritabanı IP/Hostname
   - `user`: `oracle` veya yetkili kullanıcı
-  - `key_file`: Şifresiz SSH erişimi için anahtar yolunuz (Örn: `~/.ssh/id_rsa`). Eğer şifre kullanacaksanız `password: "şifreniz"` satırını ekleyebilirsiniz.
-- **ORACLE_CONFIG**: Hedef sunucudaki Veritabanı bağlantı detayları ve ORACLE_HOME yolları.
+  - `key_file`: Şifresiz SSH erişimi için anahtar yolunuz (Örn: `~/.ssh/id_rsa`).
+- **ORACLE_CONFIG**: Veritabanı bağlantı detayları ve ORACLE_HOME yolları.
 - **BACKUP_CONFIG**: 
-  - `backup_root`: Hedef sunucudaki (Oracle DB makinesindeki) yedekleme dizini.
-  - `log_dir` ve `history_dir`: **Jump Server** üzerindeki lokal log yolları.
-  - `remote_dest`: Hedef DB sunucusunun yedekleri kopyalayacağı nihai uzak sunucu.
-  - `transfer_method`: Windows hedefler için `scp`, Linux için `rsync` önerilir.
-  - `transfer_hours`: Her çalışmada transfer için `"all"` kullanabilirsiniz.
+  - `backup_root`: Hedef sunucudaki (veya Lokal makinedeki) yedekleme dizini (Örn: `/backup`).
+  - `log_dir` ve `history_dir`: Log ve geçmiş dosyalarının yolları. Tanımlanmazsa varsayılan olarak `~/huaris/logs` klasörleri otomatik olarak yaratılır.
+  - `device_type`: `DISK` veya `SBT_TAPE`.
+  - `parallelism`: Paralellik derecesi.
+  - `rman_script_file`: Eğer özel bir script kullanacaksanız bu dosyanın adı (Örn: `backup.rman`).
+  - `remote_dest`: Yedeklerin kopyalanacağı nihai uzak sunucu.
+  - `transfer_method`: Windows hedefler için `scp`, Linux için `rsync`.
+  - `transfer_hours`: Transfer saati veya her çalışmada transfer için `"all"`.
 - **MAIL_CONFIG** ve **VAULT_CONFIG**: E-posta ve şifre kasası ayarları.
 
 ## Güvenlik ve SSH Yetkilendirmesi (Passwordless SSH)
-Jump Server'ın hedef Oracle sunucusuna şifre girmeden bağlanabilmesi için SSH anahtarı oluşturup hedef sunucuya kopyalamanız gerekir:
+Eğer `TARGET_SERVER.enabled: True` kullanıyorsanız, Jump Server'ın hedef Oracle sunucusuna şifre girmeden bağlanabilmesi için SSH anahtarı oluşturup hedef sunucuya kopyalamanız gerekir:
 ```bash
 # Jump Server'da (eğer daha önce üretmediyseniz):
 ssh-keygen -t rsa
@@ -56,24 +60,23 @@ ssh-keygen -t rsa
 ssh-copy-id -i ~/.ssh/id_rsa.pub oracle@hedef_db_sunucusu
 ```
 
-Aynı şekilde eğer SCP transferi yapılacaksa, **Hedef DB Sunucusu**'nun da yedeklerin gönderileceği nihai Windows/Linux sunucusuna SSH anahtarı üzerinden erişebiliyor olması gerekir.
+## Otomatik Kurulum ve Çalıştırma (`run.sh`)
 
-## Test Modu (Dry-Run, Mail Test, ve SCP Test)
+Süreci çok daha kolay yönetmek ve her seferinde sanal ortam (`venv`) oluşturma/aktif etme ile uğraşmamak için `run.sh` betiğini kullanabilirsiniz.
 
 ```bash
-# RMAN, SCP/Rsync işlemlerini atlayarak scriptin çalışmasını simüle eder:
-python3 backup.py --dry-run
+# Test modları dahil her türlü parametreyi run.sh'a geçirebilirsiniz:
+./run.sh --dry-run
+./run.sh --test-mail
+./run.sh --test-transfer
 
-# Sadece Mail yapılandırmasını test eder ve test e-postası gönderir:
-python3 backup.py --test-mail
-
-# Sadece Control File yedeği alıp, bunu hemen SCP/Rsync ile uzak sunucuya göndererek bağlantıyı/transferi test eder:
-python3 backup.py --test-transfer
+# Normal çalışma (Otomasyon için):
+./run.sh
 ```
 
 ## Otomasyon (Crontab Kurulumu)
 
-Jump Server üzerinde scriptin her saat başı çalışması için crontab'a ekleyebilirsiniz:
+Çalıştırma işlemi için crontab'a `run.sh` dosyasını eklemeniz yeterlidir:
 
 ```bash
 crontab -e
@@ -81,5 +84,5 @@ crontab -e
 
 Aşağıdaki satırı ekleyin:
 ```bash
-0 * * * * /usr/bin/python3 /path/to/oracle-backup/backup.py >> /tmp/oracle_backup_cron.log 2>&1
+0 * * * * /path/to/oracle-backup/run.sh >> /tmp/oracle_backup_cron.log 2>&1
 ```
