@@ -346,7 +346,7 @@ exit $RC"""
     
     for line in (out + "\n" + err).splitlines():
         if error_pattern.search(line):
-            if "RMAN-00571" in line or "RMAN-00569" in line or "Recovery Manager complete" in line:
+            if any(ignore in line for ignore in ["RMAN-00571", "RMAN-00569", "Recovery Manager complete", "WARNING:"]):
                 continue
             found_error = True
             break
@@ -846,7 +846,6 @@ RUN {{
 
 {cleanup_cmds}
 
-LIST BACKUP SUMMARY;
 QUIT;
 """
             if dry_run:
