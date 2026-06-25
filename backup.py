@@ -794,21 +794,22 @@ QUIT;
                     # Build cleanup commands from template
                     cleanup_cmds = ""
                     if cleanup.get("delete_obsolete", True):
-                        cleanup_cmds += f"\n  DELETE NOPROMPT OBSOLETE RECOVERY WINDOW OF {recovery_window} DAYS;"
+                        cleanup_cmds += f"\nDELETE NOPROMPT OBSOLETE RECOVERY WINDOW OF {recovery_window} DAYS;"
                     if cleanup.get("crosscheck_archivelog", True):
-                        cleanup_cmds += "\n  CROSSCHECK ARCHIVELOG ALL;"
+                        cleanup_cmds += "\nCROSSCHECK ARCHIVELOG ALL;"
                     if cleanup.get("crosscheck_backup", True):
-                        cleanup_cmds += "\n  CROSSCHECK BACKUP OF ARCHIVELOG ALL;"
+                        cleanup_cmds += "\nCROSSCHECK BACKUP OF ARCHIVELOG ALL;"
                     if cleanup.get("report_obsolete", True):
-                        cleanup_cmds += "\n  REPORT OBSOLETE;"
+                        cleanup_cmds += "\nREPORT OBSOLETE;"
                     if cleanup.get("delete_expired_archivelog", True):
-                        cleanup_cmds += "\n  DELETE NOPROMPT EXPIRED ARCHIVELOG ALL;"
+                        cleanup_cmds += "\nDELETE NOPROMPT EXPIRED ARCHIVELOG ALL;"
                     if cleanup.get("delete_expired_controlfile", True):
-                        cleanup_cmds += "\n  DELETE NOPROMPT EXPIRED BACKUP OF CONTROLFILE;"
+                        cleanup_cmds += "\nDELETE NOPROMPT EXPIRED BACKUP OF CONTROLFILE;"
                     if cleanup.get("delete_obsolete_orphan", True):
-                        cleanup_cmds += "\n  DELETE FORCE NOPROMPT OBSOLETE ORPHAN;"
-                        cleanup_cmds += "\n  DELETE FORCE NOPROMPT OBSOLETE;"
-                    cleanup_cmds += f"\n  {archivelog_deletion_cmd}"
+                        cleanup_cmds += "\nDELETE FORCE NOPROMPT OBSOLETE ORPHAN;"
+                        cleanup_cmds += "\nDELETE FORCE NOPROMPT OBSOLETE;"
+                    if archivelog_deletion_cmd:
+                        cleanup_cmds += f"\n{archivelog_deletion_cmd}"
 
                     # SPFILE backup from template
                     spfile_cmd = ""
@@ -833,11 +834,12 @@ CONFIGURE SNAPSHOT CONTROLFILE NAME TO '{full_path}/snapcf_%d_{file_name}.f';
 RUN {{
 {allocate_cmds}
 {backup_cmds}
-{cleanup_cmds}
 {spfile_cmd}
 {extra_cmds}
 
 {release_cmds}}}
+
+{cleanup_cmds}
 
 LIST BACKUP SUMMARY;
 QUIT;
