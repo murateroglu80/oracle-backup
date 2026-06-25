@@ -826,6 +826,10 @@ QUIT;
                         extra_cmds += f"\n  {resolved_cmd}"
 
                     rman_script = f"""
+CONFIGURE CONTROLFILE AUTOBACKUP ON;
+CONFIGURE CONTROLFILE AUTOBACKUP FORMAT FOR DEVICE TYPE {device_type} TO '{full_path}/%F';
+CONFIGURE SNAPSHOT CONTROLFILE NAME TO '{full_path}/snapcf_%d_{file_name}.f';
+
 RUN {{
 {allocate_cmds}
 {backup_cmds}
