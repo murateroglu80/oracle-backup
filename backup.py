@@ -326,6 +326,9 @@ def check_standby_exists(logger, env, ssh_client):
 
 def run_rman(logger, env, ssh_client, rman_script, label="rman"):
     start = time.time()
+    
+    logger.info(f"Executing RMAN Script ({label}):\n{rman_script}")
+    
     # Fail-Fast wrapper: Preserve RC
     # Use heredoc with 'EOF' (single-quoted) so shell does NO variable expansion
     cmd = f"""RMAN_TMP=$(mktemp /tmp/rman_script_XXXXXX.rman)
