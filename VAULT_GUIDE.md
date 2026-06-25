@@ -1,23 +1,23 @@
-# HashiCorp Vault Kurulum ve Yapılandırma Kılavuzu
+# HashiCorp Vault Installation and Configuration Guide
 
-Bu kılavuz, RMAN Yedekleme Sistemi için HashiCorp Vault'un kurulumu, yapılandırılması ve SMTP şifrelerinin güvenli bir şekilde saklanması adımlarını içerir.
+This guide covers the steps for installing HashiCorp Vault, configuring it, and securely storing SMTP passwords for the RMAN Backup System.
 
-## 1. Kurulum (Linux - RHEL/CentOS)
+## 1. Installation (Linux - RHEL/CentOS)
 
-### Depo Ekleme
+### Add Repository
 ```bash
 sudo yum install -y yum-utils
 sudo yum-config-manager --add-repo https://rpm.releases.hashicorp.com/RHEL/hashicorp.repo
 ```
 
-### Kurulum
+### Install Vault
 ```bash
 sudo yum install vault -y
 ```
 
-## 2. Temel Yapılandırma
+## 2. Basic Configuration
 
-Vault için temel bir yapılandırma dosyası oluşturun (`/etc/vault.d/vault.hcl`):
+Create a basic configuration file for Vault (`/etc/vault.d/vault.hcl`):
 
 ```hcl
 storage "file" {
@@ -32,69 +32,69 @@ listener "tcp" {
 ui = true
 ```
 
-### Servisi Başlatma
+### Start the Service
 ```bash
 sudo systemctl enable vault
 sudo systemctl start vault
 ```
 
-## 3. Başlatma (Initialization) ve Kilit Açma (Unsealing)
+## 3. Initialization and Unsealing
 
-Vault ilk kurulduğunda kilitlidir.
+When Vault is first installed, it is sealed.
 
-### Başlatma
+### Initialize
 ```bash
 export VAULT_ADDR='http://127.0.0.1:8200'
 vault operator init
 ```
-**ÖNEMLİ:** Bu komutun çıktısındaki "Unseal Keys" ve "Initial Root Token" bilgilerini güvenli bir yere kaydedin.
+**IMPORTANT:** Securely save the "Unseal Keys" and "Initial Root Token" from the output of this command.
 
-### Kilidi Açma
-En az 3 anahtar kullanarak kilidi açın:
+### Unseal
+Unseal using at least 3 keys:
 ```bash
-vault operator unseal <anahtar_1>
-vault operator unseal <anahtar_2>
-vault operator unseal <anahtar_3>
+vault operator unseal <key_1>
+vault operator unseal <key_2>
+vault operator unseal <key_3>
 ```
 
-## 4. KV Secrets Engine Etkinleştirme
+## 4. Enable KV Secrets Engine
 
-Şifreleri saklamak için KV (Key-Value) motorunu etkinleştirin:
+Enable the KV (Key-Value) engine to store passwords:
 
 ```bash
 vault login <root_token>
 vault secrets enable -path=secret kv-v2
 ```
 
-## 5. Yedekleme Sistemi İçin Şifre Tanımlama
+## 5. Define Password for the Backup System
 
-Betiğin beklediği şifreyi oluşturun:
+Create the password expected by the script:
 
 ```bash
-vault kv put secret/mail smtp_password="B!294241944903uf"
+vault kv put secret/mail smtp_password="changeme"
 ```
 
-## 6. AppRole ve Politika Yapılandırma (Güvenli Erişim)
+## 6. AppRole and Policy Configuration (Secure Access)
 
-Betiğin root token kullanmaması için sınırlı yetkili bir AppRole oluşturun.
+Create an AppRole with limited privileges so the script does not need to use the root token.
 
-### Politika Oluşturma (`backup-policy.hcl`)
+### Create Policy (`backup-policy.hcl`)
 ```hcl
 path "secret/data/mail" {
   capabilities = ["read"]
 }
 ```
 
-Politikayı yükleyin:
+Upload the policy:
 ```bash
 vault policy write backup-policy backup-policy.hcl
 ```
 
-### AppRole Kurulumu
+### Setup AppRole
 ```bash
 vault auth enable approle
 
-# Rolü oluşturun
+# Create the role
 vault write auth/approle/role/backup-role \
     secret_id_ttl=0 \
     token_num_uses=0 \
@@ -102,14 +102,14 @@ vault write auth/approle/role/backup-role \
     token_max_ttl=30m \
     policies="backup-policy"
 
-# RoleID ve SecretID alın
+# Get RoleID and SecretID
 vault read auth/approle/role/backup-role/role-id
 vault write -f auth/approle/role/backup-role/secret-id
 ```
 
-## 7. `config.yaml` Güncelleme
+## 7. Update `config.yaml`
 
-Aldığınız RoleID ve SecretID (veya Token) bilgilerini `config.yaml` dosyasına işleyin.
+Enter the obtained RoleID and SecretID (or Token) into your `config.yaml` file.
 
 ---
-*Hazırlayan: Gemini CLI Agent*
+*Prepared by: Gemini CLI Agent*
