@@ -584,12 +584,20 @@ def send_daily_summary(history_dir, mail_config, smtp_password, logger, target_d
     subject = f"{mail_config['subject_prefix']} [{final_severity_label}] Daily Summary | {target_date}"
     
     # Extract info safely
-    oracle_sid = oracle_config.get("oracle_sid", "N/A") if oracle_config else "N/A"
-    db_name = oracle_config.get("db_name", oracle_sid) if oracle_config else "N/A"
-    transfer_target = target_server.get("host", "None") if target_server else "None"
+    oracle_sid = oracle_config.get("ORACLE_SID", "N/A") if oracle_config else "N/A"
     
-    import socket
-    local_host = socket.gethostname()
+    # Db host is either ORACLE_HOSTNAME or TARGET_SERVER host
+    db_host = "Unknown"
+    if oracle_config and oracle_config.get("ORACLE_HOSTNAME"):
+        db_host = oracle_config.get("ORACLE_HOSTNAME")
+    elif target_server and target_server.get("host"):
+        db_host = target_server.get("host")
+    else:
+        import socket
+        db_host = socket.gethostname()
+
+    # Transfer target is remote_dest in BACKUP_CONFIG
+    transfer_target = backup_config.get("remote_dest", "None") if backup_config else "None"
 
     success_count = sum(1 for r in day_runs if r.get('status', '').upper() == 'SUCCESS')
     total_count = len(day_runs)
@@ -600,14 +608,14 @@ def send_daily_summary(history_dir, mail_config, smtp_password, logger, target_d
         <div style="max-width: 950px; margin: 0 auto; border: 1px solid #ddd; border-radius: 8px; overflow: hidden;">
             <div style="background-color: {status_color}; color: white; padding: 20px; text-align: center;">
                 <h2 style="margin: 0;">Oracle RMAN Backup Summary</h2>
-                <p style="margin: 5px 0 0 0;">Status: {overall_status} | Server: {local_host} | DB: {db_name}</p>
+                <p style="margin: 5px 0 0 0;">Status: {overall_status} | Server: {db_host} | DB: {oracle_sid}</p>
             </div>
             
             <div style="padding: 20px;">
                 <table style="width: 100%; border-collapse: collapse; margin-bottom: 20px;">
                     <tr>
                         <td style="width: 50%; padding: 10px; background: #f4f4f4;"><strong>Date:</strong> {target_date}</td>
-                        <td style="width: 50%; padding: 10px; background: #f4f4f4;"><strong>Local Hostname:</strong> {local_host}</td>
+                        <td style="width: 50%; padding: 10px; background: #f4f4f4;"><strong>DB Hostname:</strong> {db_host}</td>
                     </tr>
                     <tr>
                         <td style="padding: 10px;"><strong>Oracle SID:</strong> {oracle_sid}</td>
