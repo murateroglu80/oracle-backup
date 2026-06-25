@@ -66,7 +66,7 @@ MAIL_CONFIG:
   to_addrs: 
     - "dba-team@example.com"
   subject_prefix: "[RMAN BACKUP]"
-  daily_mail_hour: 23
+  daily_mail_hour: 23 # Send mail at this hour (e.g. 23) or set to "all" to send after every run
 
 VAULT_CONFIG:
   enabled: False

@@ -980,7 +980,7 @@ QUIT;
 
         # Send Daily Summary
         daily_mail_hour = MAIL_CONFIG.get("daily_mail_hour", 23)
-        should_send_mail = (transfer_triggered or hour == daily_mail_hour)
+        should_send_mail = (transfer_triggered or str(daily_mail_hour).lower() == "all" or hour == daily_mail_hour)
         
         if should_send_mail and MAIL_CONFIG.get("enabled"):
             smtp_password = None
