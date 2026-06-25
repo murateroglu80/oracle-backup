@@ -758,13 +758,18 @@ QUIT;
                     ret_days = cleanup.get("archive_retention_days", 2)
                     recovery_window = cleanup.get("recovery_window_days", 1)
 
+                    def is_true(val):
+                        if isinstance(val, str):
+                            return val.lower() in ('true', 'yes', '1', 'on')
+                        return bool(val)
+
                     if has_standby:
                         archivelog_deletion_cmd = f"DELETE NOPROMPT ARCHIVELOG ALL COMPLETED BEFORE 'SYSDATE-{ret_days}' BACKED UP 1 TIMES TO DISK AND APPLIED ON ALL STANDBY;"
                     else:
                         archivelog_deletion_cmd = f"DELETE NOPROMPT ARCHIVELOG ALL COMPLETED BEFORE 'SYSDATE-{ret_days}' BACKED UP 1 TIMES TO DISK;"
 
                     # If neither database nor archivelogs are being backed up, fallback to parallelism 1
-                    if not RMAN_TEMPLATE.get("full_backup", True) and not RMAN_TEMPLATE.get("archive_backup", True):
+                    if not is_true(RMAN_TEMPLATE.get("full_backup", True)) and not is_true(RMAN_TEMPLATE.get("archive_backup", True)):
                         logger.info("Only controlfile/SPFILE backup requested. Forcing parallelism to 1.")
                         parallelism = 1
 
@@ -777,22 +782,22 @@ QUIT;
 
                     # Build backup commands from template
                     backup_cmds = ""
-                    if RMAN_TEMPLATE.get("full_backup", True):
+                    if is_true(RMAN_TEMPLATE.get("full_backup", True)):
                         backup_cmds += f"""
   BACKUP AS COMPRESSED BACKUPSET FULL DATABASE 
     TAG 'DATABASE_{file_name}' 
     FORMAT '{full_path}/Data_%d_%I_%s_%T_%U.rman';
 """
-                    backup_cmds += "\n  SQL 'ALTER SYSTEM ARCHIVE LOG CURRENT';\n"
 
-                    if RMAN_TEMPLATE.get("archive_backup", True):
+                    if is_true(RMAN_TEMPLATE.get("archive_backup", True)):
                         backup_cmds += f"""
+  SQL 'ALTER SYSTEM ARCHIVE LOG CURRENT';
   BACKUP AS COMPRESSED BACKUPSET 
     TAG 'ARCHIVELOG_{file_name}' 
     FORMAT '{full_path}/ARCH_%d_%I_%s_%T_%U.arch' 
     ARCHIVELOG ALL;
 """
-                    if RMAN_TEMPLATE.get("controlfile_backup", True):
+                    if is_true(RMAN_TEMPLATE.get("controlfile_backup", True)):
                         backup_cmds += f"""
   BACKUP AS COMPRESSED BACKUPSET CURRENT CONTROLFILE 
     TAG 'CONTROLFILE_{file_name}' 
@@ -801,27 +806,27 @@ QUIT;
 
                     # Build cleanup commands from template
                     cleanup_cmds = ""
-                    if cleanup.get("delete_obsolete", True):
+                    if is_true(cleanup.get("delete_obsolete", True)):
                         cleanup_cmds += f"\nDELETE NOPROMPT OBSOLETE RECOVERY WINDOW OF {recovery_window} DAYS;"
-                    if cleanup.get("crosscheck_archivelog", True):
+                    if is_true(cleanup.get("crosscheck_archivelog", True)):
                         cleanup_cmds += "\nCROSSCHECK ARCHIVELOG ALL;"
-                    if cleanup.get("crosscheck_backup", True):
+                    if is_true(cleanup.get("crosscheck_backup", True)):
                         cleanup_cmds += "\nCROSSCHECK BACKUP OF ARCHIVELOG ALL;"
-                    if cleanup.get("report_obsolete", True):
+                    if is_true(cleanup.get("report_obsolete", True)):
                         cleanup_cmds += "\nREPORT OBSOLETE;"
-                    if cleanup.get("delete_expired_archivelog", True):
+                    if is_true(cleanup.get("delete_expired_archivelog", True)):
                         cleanup_cmds += "\nDELETE NOPROMPT EXPIRED ARCHIVELOG ALL;"
-                    if cleanup.get("delete_expired_controlfile", True):
+                    if is_true(cleanup.get("delete_expired_controlfile", True)):
                         cleanup_cmds += "\nDELETE NOPROMPT EXPIRED BACKUP OF CONTROLFILE;"
-                    if cleanup.get("delete_obsolete_orphan", True):
+                    if is_true(cleanup.get("delete_obsolete_orphan", True)):
                         cleanup_cmds += "\nDELETE FORCE NOPROMPT OBSOLETE ORPHAN;"
                         cleanup_cmds += "\nDELETE FORCE NOPROMPT OBSOLETE;"
-                    if archivelog_deletion_cmd:
+                    if archivelog_deletion_cmd and is_true(RMAN_TEMPLATE.get("archive_backup", True)):
                         cleanup_cmds += f"\n{archivelog_deletion_cmd}"
 
                     # SPFILE backup from template
                     spfile_cmd = ""
-                    if RMAN_TEMPLATE.get("spfile_backup", True):
+                    if is_true(RMAN_TEMPLATE.get("spfile_backup", True)):
                         spfile_cmd = f"""
   BACKUP SPFILE 
     TAG 'SPFILE_{file_name}' 
