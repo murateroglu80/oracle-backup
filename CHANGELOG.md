@@ -2,6 +2,19 @@
 
 All notable changes to the backup system are documented in this file.
 
+## [6.1.1] - 2026-06-25
+
+### Improved
+- **RMAN Parallelism Optimization:** Automatically reduces parallelism to 1 channel when only `controlfile_backup` or `spfile_backup` are requested, avoiding unnecessary system load.
+- **RMAN Script Logging:** Explicitly logs the exact, fully constructed RMAN script (`[INFO] Executing RMAN Script...`) to the output/log right before execution.
+- **Robust Configuration Parsing:** Added a safe boolean parser (`is_true`) for `config.yaml` to ensure string inputs (like `"False"`, `"false"`) are correctly evaluated and do not unintentionally enable disabled features (like SPFILE backup).
+- **Archivelog Cleanup Logic:** The `DELETE NOPROMPT ARCHIVELOG ALL` command is now strictly tied to the `archive_backup: True` condition.
+
+### Fixed
+- **Maintenance Channel Allocation (RMAN-06091):** Moved all `DELETE` and `CROSSCHECK` maintenance commands completely outside the `RUN { ... }` block to allow RMAN to auto-allocate maintenance channels correctly (preventing failures if tape backups exist in the catalog but no tape channels are allocated).
+- **Benign RMAN Warnings (rc=0):** Updated the error parser to safely ignore benign RMAN warnings (e.g., `RMAN-08120`, `RMAN-08137` related to standby logs) so they no longer trigger a hard script failure when the exit code is 0.
+- **Removed Unnecessary Commands:** Removed `LIST BACKUP SUMMARY` to reduce clutter.
+
 ## [6.1.0] - 2026-06-25
 
 ### Added
