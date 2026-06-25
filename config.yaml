@@ -29,12 +29,30 @@ BACKUP_CONFIG:
   remote_dest: "oracle@192.168.210.124:/share/oracle"
   transfer_method: "scp" # "rsync" or "scp"
   transfer_hours: [20] # List of hours like [20, 23], or "all" to transfer on every run
-  spfile_backup: False
-  validate_backup: False
-  archive_retention_days: 2
   device_type: "DISK" # DISK or SBT_TAPE
   parallelism: 8
-  rman_script_file: "backup.rman" # Optional custom RMAN script file
+  rman_script_file: "" # Optional: path to custom .rman file. Empty = use RMAN_TEMPLATE
+
+# RMAN Template - Her bölüm True/False ile açılıp kapatılabilir
+RMAN_TEMPLATE:
+  full_backup: True
+  archive_backup: True
+  controlfile_backup: True
+  spfile_backup: True
+  cleanup:
+    delete_obsolete: True
+    recovery_window_days: 1
+    crosscheck_archivelog: True
+    crosscheck_backup: True
+    report_obsolete: True
+    delete_expired_archivelog: True
+    delete_expired_controlfile: True
+    delete_obsolete_orphan: True
+    archive_retention_days: 2
+  extra_commands: []
+  # extra_commands örnekleri:
+  #   - "BACKUP CURRENT CONTROLFILE FOR STANDBY FORMAT '{path}/Standby_CTL_%d_%T_%U.rman';"
+  #   - "VALIDATE BACKUPSET 123;"
 
 MAIL_CONFIG:
   enabled: True

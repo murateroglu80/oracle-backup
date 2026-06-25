@@ -32,6 +32,8 @@ from email.header import Header
 
 import hvac
 import paramiko
+
+
 def load_config(config_path="config.yaml"):
     script_dir = os.path.dirname(os.path.abspath(__file__))
     full_path = os.path.join(script_dir, config_path)
@@ -194,20 +196,24 @@ def release_lock(pid_file):
 # 5. DISK SPACE MANAGEMENT
 # ============================================================
 
-def get_free_gb(ssh_client, path):
+def get_free_gb(ssh_client, path, logger=None):
     status, out, err = run_command_wrapper(ssh_client, f"df -k {path} | awk 'NR==2 {{print $4}}'", None, quiet=True)
     try:
         kb = int(out.strip())
         return kb / (1024 ** 2)
-    except Exception:
+    except Exception as e:
+        if logger:
+            logger.warning(f"Could not determine free space for '{path}': {e}. Returning 0 GB.")
         return 0
 
-def get_dir_size_gb(ssh_client, path):
+def get_dir_size_gb(ssh_client, path, logger=None):
     status, out, err = run_command_wrapper(ssh_client, f"du -sk {path} | awk '{{print $1}}'", None, quiet=True)
     try:
         kb = int(out.strip())
         return kb / (1024 ** 2)
-    except Exception:
+    except Exception as e:
+        if logger:
+            logger.warning(f"Could not determine dir size for '{path}': {e}. Returning 0 GB.")
         return 0
 
 def list_daily_dirs(ssh_client, backup_root):
@@ -218,7 +224,8 @@ def list_daily_dirs(ssh_client, backup_root):
             parts = line.split("|")
             try:
                 dirs.append((parts[0], float(parts[1])))
-            except: pass
+            except Exception:
+                pass
     dirs.sort(key=lambda x: x[1])
     return [d[0] for d in dirs]
 
@@ -254,7 +261,7 @@ def ensure_free_space(logger, ssh_client, env, backup_config):
     backup_root = backup_config["backup_root"]
     history_dir = backup_config.get("history_dir")
     required_gb = get_required_gb(logger, backup_config)
-    free_gb     = get_free_gb(ssh_client, backup_root)
+    free_gb     = get_free_gb(ssh_client, backup_root, logger)
 
     logger.info(f"Free disk space on target : {free_gb:.1f} GB  |  Required : {required_gb:.1f} GB")
 
@@ -263,21 +270,27 @@ def ensure_free_space(logger, ssh_client, env, backup_config):
 
     logger.warning("Insufficient disk space! Removing oldest backup dirs from target...")
 
+    # Run RMAN catalog cleanup once before removing directories
+    rman_clean = "CROSSCHECK BACKUP; DELETE NOPROMPT EXPIRED BACKUP; DELETE NOPROMPT OBSOLETE; QUIT;"
+    try:
+        run_rman(logger, env, ssh_client, rman_clean, label="cleanup")
+    except RuntimeError:
+        logger.warning("RMAN catalog cleanup failed during space reclamation. Continuing with directory removal.")
+
     daily_dirs = list_daily_dirs(ssh_client, backup_root)
     for old_dir in daily_dirs:
         if free_gb >= required_gb:
             break
-        rman_clean = "CROSSCHECK BACKUP; DELETE NOPROMPT EXPIRED BACKUP; DELETE NOPROMPT OBSOLETE; QUIT;"
-        try:
-            run_rman(logger, env, ssh_client, rman_clean, label="cleanup")
-        except RuntimeError:
-            pass
-
         run_command_wrapper(ssh_client, f"rm -rf {old_dir}", logger)
         logger.info(f"Removed directory for space: {old_dir}")
         mark_history_deleted(history_dir, old_dir)
-        
-        free_gb = get_free_gb(ssh_client, backup_root)
+        free_gb = get_free_gb(ssh_client, backup_root, logger)
+
+    # Crosscheck again after physical removal to sync RMAN catalog
+    try:
+        run_rman(logger, env, ssh_client, "CROSSCHECK BACKUP; CROSSCHECK ARCHIVELOG ALL; QUIT;", label="post-cleanup-crosscheck")
+    except RuntimeError:
+        logger.warning("Post-cleanup crosscheck failed.")
 
     if free_gb < required_gb:
         logger.error("Could not free enough space. Backup aborted.")
@@ -313,14 +326,15 @@ def check_standby_exists(logger, env, ssh_client):
 
 def run_rman(logger, env, ssh_client, rman_script, label="rman"):
     start = time.time()
-    script_escaped = rman_script.replace('$', '\\$').replace('`', '\\`')
     # Fail-Fast wrapper: Preserve RC
-    cmd = f"""cat << 'EOF' > /tmp/rman_script_$$.rman
-{script_escaped}
+    # Use heredoc with 'EOF' (single-quoted) so shell does NO variable expansion
+    cmd = f"""RMAN_TMP=$(mktemp /tmp/rman_script_XXXXXX.rman)
+cat << 'EOF' > $RMAN_TMP
+{rman_script}
 EOF
-rman target / @/tmp/rman_script_$$.rman
+rman target / @$RMAN_TMP
 RC=$?
-rm -f /tmp/rman_script_$$.rman
+rm -f $RMAN_TMP
 exit $RC"""
     
     status, out, err = run_command_wrapper(ssh_client, cmd, logger, env_dict=env, timeout=7200)
@@ -626,7 +640,8 @@ def main(dry_run=False, test_mail=False, test_transfer=False):
             if os.path.exists(latest_link) or os.path.islink(latest_link):
                 os.remove(latest_link)
             os.symlink(log_file, latest_link)
-        except: pass
+        except Exception:
+            pass
     
     if dry_run: logger.info("=== STARTING IN DRY-RUN MODE ===")
     if test_transfer: logger.info("=== STARTING TEST TRANSFER MODE ===")
@@ -706,71 +721,117 @@ def main(dry_run=False, test_mail=False, test_transfer=False):
             # RMAN Backup
             parallelism = BACKUP_CONFIG.get("parallelism", 1)
             device_type = BACKUP_CONFIG.get("device_type", "DISK").upper()
-            rman_script_file = BACKUP_CONFIG.get("rman_script_file")
+            rman_script_file = BACKUP_CONFIG.get("rman_script_file", "")
+            RMAN_TEMPLATE = config.get("RMAN_TEMPLATE", {})
             
             rman_script = None
+            # Priority 1: Custom .rman file
             if rman_script_file:
-                # Resolve path relative to script dir
                 if not os.path.isabs(rman_script_file):
                     rman_script_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), rman_script_file)
                 if os.path.exists(rman_script_file):
                     logger.info(f"Using custom RMAN script from: {rman_script_file}")
                     with open(rman_script_file, "r") as f:
                         rman_script = f.read()
+                else:
+                    logger.warning(f"Custom RMAN script file '{rman_script_file}' not found. Falling back to RMAN_TEMPLATE.")
 
+            # Priority 2: RMAN Template from config.yaml
             if not rman_script:
                 if test_transfer:
+                    # test_transfer also uses RUN block to avoid SBT_TAPE fallback
                     rman_script = f"""
-BACKUP AS COMPRESSED BACKUPSET CURRENT CONTROLFILE
-  FORMAT '{full_path}/controlfile_test_{file_name}';
+RUN {{
+  ALLOCATE CHANNEL c1 TYPE {device_type};
+  BACKUP AS COMPRESSED BACKUPSET CURRENT CONTROLFILE
+    FORMAT '{full_path}/controlfile_test_{file_name}';
+  RELEASE CHANNEL c1;
+}}
 QUIT;
 """
                 else:
                     has_standby = check_standby_exists(logger, env, ssh_client)
-                    ret_days = BACKUP_CONFIG.get("archive_retention_days", 2)
+                    cleanup = RMAN_TEMPLATE.get("cleanup", {})
+                    ret_days = cleanup.get("archive_retention_days", 2)
+                    recovery_window = cleanup.get("recovery_window_days", 1)
+
                     if has_standby:
                         archivelog_deletion_cmd = f"DELETE NOPROMPT ARCHIVELOG ALL COMPLETED BEFORE 'SYSDATE-{ret_days}' BACKED UP 1 TIMES TO DISK AND APPLIED ON ALL STANDBY;"
                     else:
                         archivelog_deletion_cmd = f"DELETE NOPROMPT ARCHIVELOG ALL COMPLETED BEFORE 'SYSDATE-{ret_days}' BACKED UP 1 TIMES TO DISK;"
 
+                    # Build channel allocation
                     allocate_cmds = ""
                     release_cmds = ""
                     for i in range(1, parallelism + 1):
                         allocate_cmds += f"  ALLOCATE CHANNEL c{i} TYPE {device_type};\n"
                         release_cmds += f"  RELEASE CHANNEL c{i};\n"
 
-                    rman_script = f"""
-RUN {{
-{allocate_cmds}
+                    # Build backup commands from template
+                    backup_cmds = ""
+                    if RMAN_TEMPLATE.get("full_backup", True):
+                        backup_cmds += f"""
   BACKUP AS COMPRESSED BACKUPSET FULL DATABASE 
     TAG 'DATABASE_{file_name}' 
     FORMAT '{full_path}/Data_%d_%I_%s_%T_%U.rman';
-    
-  SQL 'ALTER SYSTEM ARCHIVE LOG CURRENT';
-  
+"""
+                    backup_cmds += "\n  SQL 'ALTER SYSTEM ARCHIVE LOG CURRENT';\n"
+
+                    if RMAN_TEMPLATE.get("archive_backup", True):
+                        backup_cmds += f"""
   BACKUP AS COMPRESSED BACKUPSET 
     TAG 'ARCHIVELOG_{file_name}' 
     FORMAT '{full_path}/ARCH_%d_%I_%s_%T_%U.arch' 
     ARCHIVELOG ALL;
-    
+"""
+                    if RMAN_TEMPLATE.get("controlfile_backup", True):
+                        backup_cmds += f"""
   BACKUP AS COMPRESSED BACKUPSET CURRENT CONTROLFILE 
     TAG 'CONTROLFILE_{file_name}' 
     FORMAT '{full_path}/CTL_%d_%T_%s_%p_ctlb';
+"""
 
-  DELETE NOPROMPT OBSOLETE RECOVERY WINDOW OF 1 DAYS;
-  CROSSCHECK ARCHIVELOG ALL;
-  CROSSCHECK BACKUP OF ARCHIVELOG ALL;
-  REPORT OBSOLETE ORPHAN;
-  REPORT OBSOLETE;
-  DELETE NOPROMPT EXPIRED ARCHIVELOG ALL;
-  DELETE NOPROMPT EXPIRED BACKUP OF CONTROLFILE;
-  DELETE FORCE NOPROMPT OBSOLETE ORPHAN;
-  DELETE FORCE NOPROMPT OBSOLETE;
-  {archivelog_deletion_cmd}
-  
+                    # Build cleanup commands from template
+                    cleanup_cmds = ""
+                    if cleanup.get("delete_obsolete", True):
+                        cleanup_cmds += f"\n  DELETE NOPROMPT OBSOLETE RECOVERY WINDOW OF {recovery_window} DAYS;"
+                    if cleanup.get("crosscheck_archivelog", True):
+                        cleanup_cmds += "\n  CROSSCHECK ARCHIVELOG ALL;"
+                    if cleanup.get("crosscheck_backup", True):
+                        cleanup_cmds += "\n  CROSSCHECK BACKUP OF ARCHIVELOG ALL;"
+                    if cleanup.get("report_obsolete", True):
+                        cleanup_cmds += "\n  REPORT OBSOLETE;"
+                    if cleanup.get("delete_expired_archivelog", True):
+                        cleanup_cmds += "\n  DELETE NOPROMPT EXPIRED ARCHIVELOG ALL;"
+                    if cleanup.get("delete_expired_controlfile", True):
+                        cleanup_cmds += "\n  DELETE NOPROMPT EXPIRED BACKUP OF CONTROLFILE;"
+                    if cleanup.get("delete_obsolete_orphan", True):
+                        cleanup_cmds += "\n  DELETE FORCE NOPROMPT OBSOLETE ORPHAN;"
+                        cleanup_cmds += "\n  DELETE FORCE NOPROMPT OBSOLETE;"
+                    cleanup_cmds += f"\n  {archivelog_deletion_cmd}"
+
+                    # SPFILE backup from template
+                    spfile_cmd = ""
+                    if RMAN_TEMPLATE.get("spfile_backup", True):
+                        spfile_cmd = f"""
   BACKUP SPFILE 
     TAG 'SPFILE_{file_name}' 
     FORMAT '{full_path}/Spfile_%d_%I_%s_%T_%U.rman';
+"""
+
+                    # Extra custom commands from template
+                    extra_cmds = ""
+                    for cmd in RMAN_TEMPLATE.get("extra_commands", []):
+                        resolved_cmd = cmd.replace("{path}", full_path)
+                        extra_cmds += f"\n  {resolved_cmd}"
+
+                    rman_script = f"""
+RUN {{
+{allocate_cmds}
+{backup_cmds}
+{cleanup_cmds}
+{spfile_cmd}
+{extra_cmds}
 
 {release_cmds}}}
 
