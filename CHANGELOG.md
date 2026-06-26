@@ -2,6 +2,19 @@
 
 All notable changes to the backup system are documented in this file.
 
+## [6.3.0] - 2026-06-26
+
+### Added
+- **Dynamic DB Credentials via Vault:** Database credentials (username, password, hostname, ip, db) are now fetched dynamically from Vault instead of using OS Authentication (`/ as sysdba`). This enhances security for all SQLPlus operations.
+- **RMAN Post-Backup SQL Reporting:** Automatically executes a query against `v$rman_backup_job_details` upon backup completion and injects the latest 10 RMAN jobs into the daily HTML summary email.
+- **Configuration Isolation:** Introduced a dedicated `vault_config.yaml` to separate highly sensitive Vault connection strings and secret paths from the main `config.yaml`.
+- **Multiple Environment Support:** The script now accepts a `--config` CLI argument (e.g., `./run.sh --config config-db2.yaml`), allowing seamless management of multiple databases from a single codebase.
+- **Database Connection Testing:** Added a `--test-db` argument to verify Vault credentials and connectivity by executing a lightweight query on the target database without running a backup.
+
+### Fixed
+- **SQLPlus PATH Issue:** Fixed an issue where `sqlplus` could not be found due to improper `$PATH` evaluation in bash environments by changing the export syntax in `run_command_wrapper`.
+- **Vault Mount Point Parsing:** Enhanced the Vault secret parser to properly detect and pass custom mount points (e.g., `database/...`) to the `hvac` library, resolving `permission denied` errors and silencing deprecation warnings.
+
 ## [6.1.1] - 2026-06-25
 
 ### Improved
