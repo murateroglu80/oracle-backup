@@ -363,7 +363,7 @@ def check_standby_exists(logger, env, ssh_client, db_creds=None):
         pwd = db_creds["password"]
         host = db_creds.get("hostname") or db_creds.get("ip")
         db = db_creds.get("db", "")
-        conn_str = f"{user}/\"{pwd}\"@{host}/{db} as sysdba"
+        conn_str = f'{user}/"{pwd}"@{host}/{db} as sysdba'
     else:
         conn_str = "/ as sysdba"
         
@@ -818,10 +818,10 @@ def main(config_file="config.yaml", dry_run=False, test_mail=False, test_transfe
             pwd = db_creds["password"]
             host = db_creds.get("hostname") or db_creds.get("ip")
             db = db_creds.get("db", "")
-            conn_str = f"{user}/\\"{pwd}\\"@{host}/{db} as sysdba"
+            conn_str = f'{user}/"{pwd}"@{host}/{db} as sysdba'
             
-            sql = "SET HEADING OFF FEEDBACK OFF PAGESIZE 0\\nSELECT sys_context('userenv','db_name') FROM dual;\\nEXIT;\\n"
-            cmd = f"echo \\"{sql}\\" | sqlplus -s '{conn_str}'"
+            sql = "SET HEADING OFF FEEDBACK OFF PAGESIZE 0\nSELECT sys_context('userenv','db_name') FROM dual;\nEXIT;\n"
+            cmd = f"echo \"{sql}\" | sqlplus -s '{conn_str}'"
             
             logger.info("Running test query on Database using Vault credentials...")
             status, out, err = run_command_wrapper(ssh_client_test, cmd, logger, env_dict=env, quiet=True)
@@ -829,7 +829,7 @@ def main(config_file="config.yaml", dry_run=False, test_mail=False, test_transfe
                 db_name = out.strip()
                 logger.info(f"DB Test Successful! Connected to database: {db_name}")
             else:
-                logger.error(f"DB Test Failed! Exit code {status}.\\nOutput: {out}\\nError: {err}")
+                logger.error(f"DB Test Failed! Exit code {status}.\nOutput: {out}\nError: {err}")
             
             if ssh_client_test:
                 ssh_client_test.close()
@@ -1189,7 +1189,7 @@ QUIT;
                 pwd = db_creds["password"]
                 host = db_creds.get("hostname") or db_creds.get("ip")
                 db = db_creds.get("db", "")
-                conn_str = f"{user}/\"{pwd}\"@{host}/{db} as sysdba"
+                conn_str = f'{user}/"{pwd}"@{host}/{db} as sysdba'
             else:
                 conn_str = "/ as sysdba"
             
