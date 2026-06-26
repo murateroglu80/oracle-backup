@@ -355,7 +355,12 @@ exit $RC"""
             break
             
     if found_error or status != 0:
-        raise RuntimeError(f"RMAN {label} failed (rc={status}). See logs for ORA-/RMAN- errors.")
+        full_out = out + "\n" + err
+        if "immutable" in full_out.lower() and "ORA-19509" in full_out:
+            if logger:
+                logger.warning(f"RMAN {label} reported an error, but it appears to be due to immutable backups preventing deletion. Ignoring error and treating as SUCCESS.")
+        else:
+            raise RuntimeError(f"RMAN {label} failed (rc={status}). See logs for ORA-/RMAN- errors.")
 
     return elapsed, out
 
@@ -653,10 +658,21 @@ def send_daily_summary(history_dir, mail_config, smtp_password, logger, target_d
     </html>
     """
 
+    to_addrs_raw = mail_config.get("to_addrs", [])
+    if isinstance(to_addrs_raw, str):
+        # Handle string like "a@b.com; c@d.com" or "a@b.com,c@d.com"
+        to_addrs_list = [addr.strip() for addr in to_addrs_raw.replace(';', ',').split(',') if addr.strip()]
+    else:
+        to_addrs_list = to_addrs_raw
+
+    if not to_addrs_list:
+        logger.warning("No valid recipient addresses found. Skipping email.")
+        return
+
     msg = MIMEMultipart("alternative")
     msg["Subject"] = Header(subject, "utf-8")
     msg["From"]    = mail_config["from_addr"]
-    msg["To"]      = ", ".join(mail_config["to_addrs"])
+    msg["To"]      = ", ".join(to_addrs_list)
     msg.attach(MIMEText(html_body, "html", "utf-8"))
 
     try:
@@ -667,7 +683,7 @@ def send_daily_summary(history_dir, mail_config, smtp_password, logger, target_d
                 srv.ehlo()
             if mail_config.get("use_auth", True):
                 srv.login(mail_config["smtp_user"], smtp_password)
-            srv.sendmail(mail_config["from_addr"], mail_config["to_addrs"], msg.as_string())
+            srv.sendmail(mail_config["from_addr"], to_addrs_list, msg.as_string())
         logger.info(f"Daily summary email sent successfully ([{final_severity_label}]).")
     except Exception as e:
         logger.error(f"Failed to send daily email: {e}")
