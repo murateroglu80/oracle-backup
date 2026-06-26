@@ -22,6 +22,10 @@ Bu Python betiği, Oracle veritabanları için gelişmiş RMAN yedekleme otomasy
 
 1. Depoyu **Jump Server**'ınıza kopyalayın:
    ```bash
+   # GitHub üzerinden:
+   git clone https://github.com/murateroglu80/oracle-backup.git
+   
+   # Veya Bitbucket üzerinden:
    git clone https://bitbucket.org/mipsoftdev/oracle-backup.git
    cd oracle-backup
    ```
