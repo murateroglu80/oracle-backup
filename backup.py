@@ -155,12 +155,17 @@ def get_vault_secret(vault_config, logger):
             logger.error("Vault secret_path for SMTP is empty or not provided.")
             return None
             
-        if secret_path.startswith("secret/data/"):
-            secret_path = secret_path.replace("secret/data/", "")
-        elif secret_path.startswith("secret/"):
-            secret_path = secret_path.replace("secret/", "")
+        parts = secret_path.strip("/").split("/", 1)
+        mount_point = parts[0] if len(parts) > 1 else "secret"
+        path = parts[1] if len(parts) > 1 else parts[0]
+        if path.startswith("data/"):
+            path = path[5:]
             
-        read_response = client.secrets.kv.v2.read_secret_version(path=secret_path)
+        read_response = client.secrets.kv.v2.read_secret_version(
+            mount_point=mount_point,
+            path=path,
+            raise_on_deleted_version=True
+        )
         password = read_response['data']['data'].get('smtp_password')
         if not password:
             password = read_response['data']['data'].get('password')
@@ -184,12 +189,17 @@ def get_vault_db_credentials(vault_config, logger):
             raise Exception("Vault authentication failed.")
         
         secret_path = vault_config.get("db_secret_path")
-        if secret_path.startswith("secret/data/"):
-            secret_path = secret_path.replace("secret/data/", "")
-        elif secret_path.startswith("secret/"):
-            secret_path = secret_path.replace("secret/", "")
+        parts = secret_path.strip("/").split("/", 1)
+        mount_point = parts[0] if len(parts) > 1 else "secret"
+        path = parts[1] if len(parts) > 1 else parts[0]
+        if path.startswith("data/"):
+            path = path[5:]
             
-        read_response = client.secrets.kv.v2.read_secret_version(path=secret_path)
+        read_response = client.secrets.kv.v2.read_secret_version(
+            mount_point=mount_point,
+            path=path,
+            raise_on_deleted_version=True
+        )
         data = read_response['data']['data']
         logger.info("DB credentials retrieved successfully.")
         return data
