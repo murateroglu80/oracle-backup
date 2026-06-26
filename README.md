@@ -22,11 +22,7 @@ This Python script provides advanced RMAN backup automation for Oracle databases
 
 1. Clone the repository to your **Jump Server**:
    ```bash
-   # From GitHub:
    git clone https://github.com/murateroglu80/oracle-backup.git
-   
-   # Or from Bitbucket:
-   git clone https://bitbucket.org/mipsoftdev/oracle-backup.git
    cd oracle-backup
    ```
 
