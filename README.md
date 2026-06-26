@@ -112,3 +112,4 @@ Aşağıdaki satırı ekleyin:
 
 ## Yapılacaklar (TODO) & Gelecek Planları
 * **SolarWinds Monitoring Entegrasyonu:** Yedekleme metriklerinin Zabbix/Prometheus'a ek olarak SolarWinds API üzerinden (SWIS REST API veya SNMP ile) SolarWinds sistemine aktarılması (Planlandı, geliştirilecek).
+* **Go (Golang) ile Derlenmiş Sürüm (Rewrite):** Kurulumu kolaylaştırmak, bağımlılıkları (Python, kütüphaneler vb.) tamamen ortadan kaldırmak ve kaynak kodun dışarıdan izinsiz/yanlışlıkla değiştirilmesini engellemek için mevcut yapının tamamen Go diline taşınması ve tek bir *binary executable* (çalıştırılabilir dosya) olarak derlenmesi.
