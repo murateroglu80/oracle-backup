@@ -54,3 +54,6 @@ Thumbs.db
 *.flv
 *.mov
 *.wmv
+config.yaml
+config-*.yaml
+vault_config.yaml

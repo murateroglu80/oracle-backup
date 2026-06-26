@@ -45,6 +45,24 @@ def load_config(config_path="config.yaml"):
         sys.exit(1)
     try:
         with open(full_path, "r", encoding="utf-8") as f:
+            config = yaml.safe_load(f)
+            
+        vault_config_path = os.path.join(script_dir, "vault_config.yaml")
+        if os.path.exists(vault_config_path):
+            with open(vault_config_path, "r", encoding="utf-8") as vf:
+                vault_cfg = yaml.safe_load(vf)
+                if vault_cfg and "VAULT_CONFIG" in vault_cfg:
+                    config["VAULT_CONFIG"] = vault_cfg["VAULT_CONFIG"]
+        
+        if "VAULT_CONFIG" not in config:
+            config["VAULT_CONFIG"] = {"enabled": False}
+            
+        return config
+    except Exception as e:
+        print(f"[ERROR] Failed to parse config file: {e}")
+        sys.exit(1)
+    try:
+        with open(full_path, "r", encoding="utf-8") as f:
             return yaml.safe_load(f)
     except Exception as e:
         print(f"[ERROR] Failed to parse config file: {e}")
@@ -75,7 +93,7 @@ def run_command_wrapper(ssh_client, cmd, logger, env_dict=None, timeout=None, qu
     env_prefix = ""
     if env_dict:
         for k, v in env_dict.items():
-            env_prefix += f"export {k}='{v}'; "
+            env_prefix += f'export {k}="{v}"; '
     full_cmd = env_prefix + cmd
     
     if not quiet and logger:
@@ -150,6 +168,30 @@ def get_vault_secret(vault_config, logger):
     except Exception as e:
         logger.error(f"Vault connection or secret retrieval failed: {e}")
         sys.exit(1)
+
+
+def get_vault_db_credentials(vault_config, logger):
+    if not vault_config.get("enabled", False) or not vault_config.get("db_secret_path"):
+        return None
+    logger.info("Connecting to HashiCorp Vault to fetch DB credentials...")
+    try:
+        client = hvac.Client(url=vault_config.get("url"), token=vault_config.get("token"))
+        if not client.is_authenticated():
+            raise Exception("Vault authentication failed.")
+        
+        secret_path = vault_config.get("db_secret_path")
+        if secret_path.startswith("secret/data/"):
+            secret_path = secret_path.replace("secret/data/", "")
+        elif secret_path.startswith("secret/"):
+            secret_path = secret_path.replace("secret/", "")
+            
+        read_response = client.secrets.kv.v2.read_secret_version(path=secret_path)
+        data = read_response['data']['data']
+        logger.info("DB credentials retrieved successfully.")
+        return data
+    except Exception as e:
+        logger.error(f"Vault DB credentials retrieval failed: {e}")
+        return None
 
 # ============================================================
 # 4. PROCESS LOCK
@@ -309,10 +351,20 @@ def format_duration(seconds):
     if h > 0: return f"{h}h {m:02d}m {s:02d}s"
     return f"{m}m {s:02d}s"
 
-def check_standby_exists(logger, env, ssh_client):
+def check_standby_exists(logger, env, ssh_client, db_creds=None):
     logger.info("Checking for Data Guard Standby existence via sqlplus...")
+    
+    if db_creds and db_creds.get("username") and db_creds.get("password"):
+        user = db_creds["username"]
+        pwd = db_creds["password"]
+        host = db_creds.get("hostname") or db_creds.get("ip")
+        db = db_creds.get("db", "")
+        conn_str = f"{user}/\"{pwd}\"@{host}/{db} as sysdba"
+    else:
+        conn_str = "/ as sysdba"
+        
     sql = "SET HEADING OFF FEEDBACK OFF PAGESIZE 0\nSELECT COUNT(*) FROM v$archive_dest WHERE target='STANDBY' AND destination IS NOT NULL;\nEXIT;\n"
-    cmd = f"echo \"{sql}\" | sqlplus -s / as sysdba"
+    cmd = f"echo \"{sql}\" | sqlplus -s '{conn_str}'"
     status, out, err = run_command_wrapper(ssh_client, cmd, logger, env_dict=env, timeout=30, quiet=True)
     if status == 0:
         try:
@@ -511,7 +563,7 @@ def mark_history_deleted(history_dir, deleted_dir_path):
     except Exception:
         pass
 
-def send_daily_summary(history_dir, mail_config, smtp_password, logger, target_date=None, target_server=None, oracle_config=None, backup_config=None):
+def send_daily_summary(history_dir, mail_config, smtp_password, logger, target_date=None, target_server=None, oracle_config=None, backup_config=None, rman_report_html=""):
     h_file = get_history_file(history_dir)
     if not os.path.exists(h_file):
         return
@@ -645,6 +697,11 @@ def send_daily_summary(history_dir, mail_config, smtp_password, logger, target_d
                     </tbody>
                 </table>
                 
+                <h3 style="border-bottom: 2px solid #eee; padding-bottom: 10px; color: #555; margin-top: 30px;">Latest RMAN Jobs (from DB)</h3>
+                <div style="font-size: 11px; overflow-x: auto;">
+                    {rman_report_html}
+                </div>
+                
                 <div style="margin-top: 20px; font-size: 0.9em; color: #777; border-top: 1px solid #eee; padding-top: 10px;">
                     Daily Overview: {success_count} Success / {total_count} Total runs today.<br>
                     Notification Level: {notification_level}
@@ -692,7 +749,7 @@ def send_daily_summary(history_dir, mail_config, smtp_password, logger, target_d
 # 9. MAIN
 # ============================================================
 
-def main(dry_run=False, test_mail=False, test_transfer=False):
+def main(config_file="config.yaml", dry_run=False, test_mail=False, test_transfer=False):
     config = load_config("config.yaml")
     TARGET_SERVER = config.get("TARGET_SERVER", {})
     ORACLE_CONFIG = config.get("ORACLE_CONFIG", {})
@@ -729,6 +786,10 @@ def main(dry_run=False, test_mail=False, test_transfer=False):
             pass
     
     if dry_run: logger.info("=== STARTING IN DRY-RUN MODE ===")
+    
+    db_creds = None
+    if VAULT_CONFIG.get("enabled"):
+        db_creds = get_vault_db_credentials(VAULT_CONFIG, logger)
     if test_transfer: logger.info("=== STARTING TEST TRANSFER MODE ===")
     
     if test_mail:
@@ -835,7 +896,7 @@ RUN {{
 QUIT;
 """
                 else:
-                    has_standby = check_standby_exists(logger, env, ssh_client)
+                    has_standby = check_standby_exists(logger, env, ssh_client, db_creds)
                     cleanup = RMAN_TEMPLATE.get("cleanup", {})
                     ret_days = cleanup.get("archive_retention_days", 2)
                     recovery_window = cleanup.get("recovery_window_days", 1)
@@ -1074,6 +1135,44 @@ QUIT;
         else:
             push_metrics(logger, MONITORING_CONFIG, oracle_sid, backup_elapsed, free_gb, required_gb, not bool(error_msg))
 
+        
+        # RMAN Report Query
+        rman_report_html = ""
+        if not dry_run and not error_msg:
+            if db_creds and db_creds.get("username") and db_creds.get("password"):
+                user = db_creds["username"]
+                pwd = db_creds["password"]
+                host = db_creds.get("hostname") or db_creds.get("ip")
+                db = db_creds.get("db", "")
+                conn_str = f"{user}/\"{pwd}\"@{host}/{db} as sysdba"
+            else:
+                conn_str = "/ as sysdba"
+            
+            report_sql = """SET MARKUP HTML ON SPOOL ON ENTMAP OFF
+SET PAGESIZE 100 LINESIZE 200 TRIMSPOOL ON HEADING ON FEEDBACK OFF
+SELECT * FROM (
+SELECT 
+  rj.session_key,
+  rj.input_type,
+  rj.status,
+  TO_CHAR(rj.start_time, 'DD.MM.YYYY HH24:MI') AS baslangic,
+  rj.input_bytes_display    AS okunan,
+  rj.output_bytes_display   AS yazilan,
+  rj.time_taken_display     AS sure
+FROM v$rman_backup_job_details rj
+ORDER BY rj.start_time DESC
+) WHERE rownum <= 10;
+EXIT;"""
+            cmd = f"echo \"{report_sql}\" | sqlplus -s '{conn_str}'"
+            status, out, err = run_command_wrapper(ssh_client, cmd, logger, env_dict=env, quiet=True)
+            if status == 0:
+                # Clear out any unwanted lines before the HTML table
+                start_idx = out.find("<table")
+                if start_idx != -1:
+                    rman_report_html = out[start_idx:]
+                else:
+                    rman_report_html = out
+
         # Send Daily Summary
         daily_mail_hour = MAIL_CONFIG.get("daily_mail_hour", 23)
         should_send_mail = (transfer_triggered or str(daily_mail_hour).lower() == "all" or hour == daily_mail_hour)
@@ -1086,7 +1185,7 @@ QUIT;
                 else:
                     smtp_password = MAIL_CONFIG.get("smtp_password")
             report_date = backup_start.strftime("%Y-%m-%d")
-            send_daily_summary(history_dir, MAIL_CONFIG, smtp_password, logger, target_date=report_date, target_server=TARGET_SERVER, oracle_config=ORACLE_CONFIG, backup_config=BACKUP_CONFIG)
+            send_daily_summary(history_dir, MAIL_CONFIG, smtp_password, logger, target_date=report_date, target_server=TARGET_SERVER, oracle_config=ORACLE_CONFIG, backup_config=BACKUP_CONFIG, rman_report_html=rman_report_html)
 
         if error_msg:
             sys.exit(1)
@@ -1098,9 +1197,10 @@ QUIT;
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Oracle RMAN Backup Script (Hybrid Jump/Local Server Edition)")
+    parser.add_argument("--config", default="config.yaml", help="Path to the main configuration file.")
     parser.add_argument("--dry-run", action="store_true", help="Run the script without executing RMAN, Rsync/SCP, or modifying history.")
     parser.add_argument("--test-mail", action="store_true", help="Send a test email using the configured SMTP settings and exit.")
     parser.add_argument("--test-transfer", action="store_true", help="Run a quick backup of only the control file and transfer it via SCP/Rsync to test the remote connection.")
     args = parser.parse_args()
 
-    main(dry_run=args.dry_run, test_mail=args.test_mail, test_transfer=args.test_transfer)
+    main(config_file=args.config, dry_run=args.dry_run, test_mail=args.test_mail, test_transfer=args.test_transfer)

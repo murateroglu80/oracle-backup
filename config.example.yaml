@@ -68,11 +68,6 @@ MAIL_CONFIG:
   subject_prefix: "[RMAN BACKUP]"
   daily_mail_hour: 23 # Send mail at this hour (e.g. 23) or set to "all" to send after every run
 
-VAULT_CONFIG:
-  enabled: False
-  url: "http://127.0.0.1:8200"
-  token: "hvs.your-vault-token-here"
-  secret_path: "secret/data/mail"
 
 MONITORING_CONFIG:
   enabled: False
