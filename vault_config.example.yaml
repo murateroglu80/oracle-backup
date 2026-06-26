@@ -1,0 +1,6 @@
+VAULT_CONFIG:
+  enabled: True
+  url: "http://127.0.0.1:8200"
+  token: "hvs.your-vault-token-here"
+  secret_path: "secret/data/mail"
+  db_secret_path: "database/mipdb1022p"
