@@ -72,6 +72,17 @@ def load_config(config_path="config.yaml"):
 # 1. COMMAND EXECUTION (SSH & LOCAL)
 # ============================================================
 
+def execute_oracle_sql(ssh_client, conn_str, sql_content, logger, env_dict, timeout=None, quiet=True):
+    """Executes a SQL script over sqlplus safely by writing it to a temporary file via Heredoc."""
+    cmd = f"""SQL_TMP=$(mktemp /tmp/oracle_query_XXXXXX.sql)
+cat << 'EOF' > "$SQL_TMP"
+{sql_content}
+EOF
+sqlplus -s '{conn_str}' @"$SQL_TMP"
+rm -f "$SQL_TMP"
+"""
+    return run_command_wrapper(ssh_client, cmd, logger, env_dict=env_dict, timeout=timeout, quiet=quiet)
+
 def get_ssh_client(ssh_config, logger):
     logger.info(f"Connecting to target server {ssh_config['host']} via SSH...")
     client = paramiko.SSHClient()
@@ -378,8 +389,7 @@ def check_standby_exists(logger, env, ssh_client, db_creds=None):
         conn_str = "/ as sysdba"
         
     sql = "SET HEADING OFF FEEDBACK OFF PAGESIZE 0\nSELECT COUNT(*) FROM v$archive_dest WHERE target='STANDBY' AND destination IS NOT NULL;\nEXIT;\n"
-    cmd = f"echo \"{sql}\" | sqlplus -s '{conn_str}'"
-    status, out, err = run_command_wrapper(ssh_client, cmd, logger, env_dict=env, timeout=30, quiet=True)
+    status, out, err = execute_oracle_sql(ssh_client, conn_str, sql, logger, env_dict=env, timeout=30, quiet=True)
     if status == 0:
         try:
             count = int(out.strip())
@@ -763,7 +773,7 @@ def send_daily_summary(history_dir, mail_config, smtp_password, logger, target_d
 # 9. MAIN
 # ============================================================
 
-def main(config_file="config.yaml", dry_run=False, test_mail=False, test_transfer=False, test_db=False):
+def main(config_file="config.yaml", dry_run=False, test_mail=False, test_transfer=False, test_db=False, test_query=None):
     config = load_config(config_file)
     TARGET_SERVER = config.get("TARGET_SERVER", {})
     ORACLE_CONFIG = config.get("ORACLE_CONFIG", {})
@@ -806,6 +816,46 @@ def main(config_file="config.yaml", dry_run=False, test_mail=False, test_transfe
         db_creds = get_vault_db_credentials(VAULT_CONFIG, logger)
     if test_transfer: logger.info("=== STARTING TEST TRANSFER MODE ===")
     
+
+    if test_query:
+        logger.info(f"=== STARTING CUSTOM DB QUERY ===")
+        try:
+            if not db_creds:
+                logger.error("No DB credentials found from Vault. Cannot test DB connection.")
+                return
+            target_enabled = TARGET_SERVER.get("enabled", False)
+            ssh_client_test = None
+            if target_enabled:
+                ssh_client_test = get_ssh_client(TARGET_SERVER, logger)
+            
+            env = {}
+            for key, val in ORACLE_CONFIG.items():
+                env[key] = str(val)
+            oh = ORACLE_CONFIG.get("ORACLE_HOME", "")
+            env["PATH"] = f"/usr/sbin:{oh}/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
+            env["LD_LIBRARY_PATH"] = f"{oh}/lib:/lib:/usr/lib"
+            
+            user = db_creds["username"]
+            pwd = db_creds["password"]
+            host = db_creds.get("hostname") or db_creds.get("ip")
+            db = db_creds.get("db", "")
+            conn_str = f'{user}/"{pwd}"@{host}/{db} as sysdba'
+            
+            sql = f"SET HEADING ON FEEDBACK ON\n{test_query}\nEXIT;\n"
+            
+            logger.info("Executing custom query...")
+            status, out, err = execute_oracle_sql(ssh_client_test, conn_str, sql, logger, env_dict=env, quiet=False)
+            if status == 0:
+                logger.info(f"Query Result:\n{out}")
+            else:
+                logger.error(f"Query Failed! Exit code {status}.\nOutput: {out}\nError: {err}")
+            
+            if ssh_client_test:
+                ssh_client_test.close()
+        except Exception as e:
+            logger.error(f"Query Test encountered an error: {e}")
+        return
+
     if test_db:
         logger.info("=== STARTING DB TEST ===")
         try:
@@ -831,10 +881,9 @@ def main(config_file="config.yaml", dry_run=False, test_mail=False, test_transfe
             conn_str = f'{user}/"{pwd}"@{host}/{db} as sysdba'
             
             sql = "SET HEADING OFF FEEDBACK OFF PAGESIZE 0\nSELECT sys_context('userenv','db_name') FROM dual;\nEXIT;\n"
-            cmd = f"echo \"{sql}\" | sqlplus -s '{conn_str}'"
             
             logger.info("Running test query on Database using Vault credentials...")
-            status, out, err = run_command_wrapper(ssh_client_test, cmd, logger, env_dict=env, quiet=True)
+            status, out, err = execute_oracle_sql(ssh_client_test, conn_str, sql, logger, env_dict=env, quiet=True)
             if status == 0:
                 db_name = out.strip()
                 logger.info(f"DB Test Successful! Connected to database: {db_name}")
@@ -1218,8 +1267,7 @@ FROM v$rman_backup_job_details rj
 ORDER BY rj.start_time DESC
 ) WHERE rownum <= 10;
 EXIT;"""
-            cmd = f"echo \"{report_sql}\" | sqlplus -s '{conn_str}'"
-            status, out, err = run_command_wrapper(ssh_client, cmd, logger, env_dict=env, quiet=True)
+            status, out, err = execute_oracle_sql(ssh_client, conn_str, report_sql, logger, env_dict=env, quiet=True)
             if status == 0:
                 # Clear out any unwanted lines before the HTML table
                 start_idx = out.find("<table")
@@ -1257,6 +1305,7 @@ if __name__ == "__main__":
     parser.add_argument("--test-mail", action="store_true", help="Send a test email using the configured SMTP settings and exit.")
     parser.add_argument("--test-transfer", action="store_true", help="Run a quick backup of only the control file and transfer it via SCP/Rsync to test the remote connection.")
     parser.add_argument("--test-db", action="store_true", help="Run a test query against the database using Vault credentials and exit.")
+    parser.add_argument("--test-query", type=str, help="Run a custom SQL query against the database and exit (e.g. --test-query \"SELECT * FROM v$database;\")")
     args = parser.parse_args()
 
-    main(config_file=args.config, dry_run=args.dry_run, test_mail=args.test_mail, test_transfer=args.test_transfer, test_db=args.test_db)
+    main(config_file=args.config, dry_run=args.dry_run, test_mail=args.test_mail, test_transfer=args.test_transfer, test_db=args.test_db, test_query=args.test_query)
