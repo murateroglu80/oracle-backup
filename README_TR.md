@@ -5,8 +5,10 @@ Bu Python betiği, Oracle veritabanları için gelişmiş RMAN yedekleme otomasy
 ## Özellikler
 - **Merkezi Yönetim (Jump Server):** Loglar, geçmiş verileri (history) ve yapılandırmalar (Vault token dahil) tek bir güvenli sunucuda tutulur.
 - Yedekleme geçmişi tutma ve akıllı disk alanı yönetimi.
-- HashiCorp Vault entegrasyonu ve SMTP bildirimleri.
+- HashiCorp Vault entegrasyonu (SMTP ve DB kimlik bilgileri için).
+- Yedekleme sonrası e-posta özetlerine otomatik RMAN SQL raporu ekleme.
 - SCP/Rsync aracılığıyla hedef DB sunucusundan bir diğer uzak sunucuya yedek kopyalama.
+- Esnek yapılandırma desteği (Çoklu ortamlar için `--config` argümanı).
 
 ## Gereksinimler
 
@@ -31,7 +33,13 @@ Bu Python betiği, Oracle veritabanları için gelişmiş RMAN yedekleme otomasy
    pip install -r requirements.txt
    ```
 
-## Yapılandırma (`config.yaml`)
+## Yapılandırma (`config.yaml` ve `vault_config.yaml`)
+
+**Not:** Güvenlik ve esneklik amacıyla ayarlar iki dosyaya ayrılmıştır. 
+- Temel ayarlar için `config.example.yaml` dosyasını kopyalayarak `config.yaml` oluşturun.
+- Vault ve hassas veriler için `vault_config.yaml` dosyasını oluşturun. Bu dosyalar git takibinden çıkarılmıştır (`.gitignore`).
+
+### Temel Ayarlar (`config.yaml`)
 
 - **TARGET_SERVER**: Scriptin SSH ile bağlanıp yedekleme işlemlerini (RMAN) tetikleyeceği asıl Oracle veritabanı sunucusu.
   - `enabled`: `True` ise işlemler SSH ile Jump Server üzerinden yürütülür. `False` ise script **doğrudan çalıştığı makinede (Lokal)** tüm işlemleri (SSH kullanmadan) gerçekleştirir.
@@ -48,7 +56,11 @@ Bu Python betiği, Oracle veritabanları için gelişmiş RMAN yedekleme otomasy
   - `remote_dest`: Yedeklerin kopyalanacağı nihai uzak sunucu.
   - `transfer_method`: Windows hedefler için `scp`, Linux için `rsync`.
   - `transfer_hours`: Transfer saati veya her çalışmada transfer için `"all"`.
-- **MAIL_CONFIG** ve **VAULT_CONFIG**: E-posta ve şifre kasası ayarları.
+  - `transfer_hours`: Transfer saati veya her çalışmada transfer için `"all"`.
+- **MAIL_CONFIG**: E-posta ayarları.
+
+### Hassas Ayarlar (`vault_config.yaml`)
+- Vault sunucu adresi, token ve veritabanı ile SMTP şifrelerinin (`db_secret_path` ve `secret_path`) bulunduğu Vault dizinleri burada tanımlanır. Bu sayede DB bağlantılarında OS auth yerine güvenli Vault verileri kullanılır.
 
 ### En İyi Uygulama (Best Practice): RMAN Şablonu
 
@@ -92,6 +104,9 @@ Süreci çok daha kolay yönetmek ve her seferinde sanal ortam (`venv`) oluştur
 ./run.sh --dry-run
 ./run.sh --test-mail
 ./run.sh --test-transfer
+
+# Farklı bir konfigürasyon dosyası ile çalıştırmak isterseniz:
+./run.sh --config config-db2.yaml
 
 # Normal çalışma (Otomasyon için):
 ./run.sh

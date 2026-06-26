@@ -5,8 +5,10 @@ This Python script provides advanced RMAN backup automation for Oracle databases
 ## Features
 - **Centralized Management (Jump Server):** Logs, historical data, and configurations (including Vault token) are kept on a single secure server.
 - Backup history tracking and smart disk space management.
-- HashiCorp Vault integration and SMTP notifications.
+- HashiCorp Vault integration (for SMTP and DB credentials).
+- Automatic RMAN SQL reporting embedded in post-backup email summaries.
 - Copy backups to another remote server via SCP/Rsync from the target DB server.
+- Flexible configuration support (`--config` argument for multiple environments).
 
 ## Requirements
 
@@ -31,7 +33,13 @@ This Python script provides advanced RMAN backup automation for Oracle databases
    pip install -r requirements.txt
    ```
 
-## Configuration (`config.yaml`)
+## Configuration (`config.yaml` and `vault_config.yaml`)
+
+**Note:** For security and flexibility, settings are split into two files.
+- Copy `config.example.yaml` to create `config.yaml` for main settings.
+- Create `vault_config.yaml` for Vault and sensitive data. These files are excluded from git tracking (`.gitignore`).
+
+### Main Settings (`config.yaml`)
 
 - **TARGET_SERVER**: The actual Oracle database server where the script will connect via SSH and trigger backup operations (RMAN).
   - `enabled`: If `True`, operations are executed over SSH via the Jump Server. If `False`, the script performs all operations directly on the machine it's running on (**Local**) without using SSH.
@@ -48,7 +56,11 @@ This Python script provides advanced RMAN backup automation for Oracle databases
   - `remote_dest`: The final remote server where backups will be copied.
   - `transfer_method`: `scp` for Windows targets, `rsync` for Linux.
   - `transfer_hours`: Transfer hour, or `"all"` for transferring on every run.
-- **MAIL_CONFIG** and **VAULT_CONFIG**: Email and password vault settings.
+  - `transfer_hours`: Transfer hour, or `"all"` for transferring on every run.
+- **MAIL_CONFIG**: Email settings.
+
+### Sensitive Settings (`vault_config.yaml`)
+- The Vault server address, token, and the Vault paths for DB and SMTP passwords (`db_secret_path` and `secret_path`) are defined here. This allows the script to securely fetch credentials instead of using OS authentication.
 
 ### Best Practice: RMAN Template
 
@@ -92,6 +104,9 @@ To manage the process much easier and avoid creating/activating a virtual enviro
 ./run.sh --dry-run
 ./run.sh --test-mail
 ./run.sh --test-transfer
+
+# If you want to use a different configuration file:
+./run.sh --config config-db2.yaml
 
 # Normal execution (For automation):
 ./run.sh
