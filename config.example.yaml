@@ -27,6 +27,7 @@ BACKUP_CONFIG:
   space_buffer_pct: 0.20
   keep_days: 7
   remote_dest: "oracle@192.168.1.100:/share/oracle"
+  os_type: "lin" # Remote server OS type: "lin" or "win"
   transfer_method: "scp" # "rsync" or "scp"
   transfer_hours: [20] # List of hours like [20, 23], or "all" to transfer on every run
   device_type: "DISK" # DISK or SBT_TAPE

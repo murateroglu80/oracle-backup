@@ -2,6 +2,17 @@
 
 All notable changes to the backup system are documented in this file.
 
+## [6.4.0] - 2026-06-27
+
+### Added
+- **Dynamic Remote Directory by SCN:** Remote backup transfers now dynamically create a folder structure based on the current date and database SCN (`MONTH/DAY/SCN` e.g., `JUN/27/123456789`). This significantly improves Disaster Recovery point-in-time organization.
+- **Remote OS Type Support:** Added `os_type` (`lin` or `win`) under `BACKUP_CONFIG` to intelligently handle remote directory creation over SSH before transferring files via SCP/Rsync.
+- **Enhanced Email Reporting:** Added a new "Remote Path" column to the HTML daily summary email, displaying the exact destination path (`/share/oracle/JUN/27/SCN`) without exposing user or IP details. Increased the overall HTML font size for better readability.
+
+### Fixed
+- **Safe SQL Execution:** Rewrote all internal SQL executions (including RMAN reporting and Standby checks) to use secure, temporary `/tmp/*.sql` files. This eliminates `ORA-04044` errors caused by bash evaluating `$` characters in oracle table names (e.g., `v$rman_backup_job_details`).
+- **Test Query CLI:** Introduced `--test-query` argument for safely testing custom SQL against the database through the new execution helper.
+
 ## [6.3.0] - 2026-06-26
 
 ### Added

@@ -635,11 +635,12 @@ def send_daily_summary(history_dir, mail_config, smtp_password, logger, target_d
                 details += f" ({run.get('transfer_speed_mbps')} MB/s)"
 
         html_rows += f"""
-        <tr style="background-color: {row_color}; border-bottom: 1px solid #eee; font-size: 11px;">
+        <tr style="background-color: {row_color}; border-bottom: 1px solid #eee; font-size: 14px;">
             <td style="padding: 8px; text-align: left;">{run.get('operation', 'Backup')}</td>
             <td style="padding: 8px; text-align: left;">{run.get('start_time', run.get('run_time', '-'))} - {run.get('end_time', '-')}</td>
             <td style="padding: 8px; text-align: right;">{run.get('duration', '-')}</td>
             <td style="padding: 8px; text-align: right;">{run.get('size_gb', '0')} GB</td>
+            <td style="padding: 8px; text-align: left;">{run.get('remote_path_only', '-')}</td>
             <td style="padding: 8px; text-align: center; font-weight: bold; color: {color};">{run_status}</td>
             <td style="padding: 8px; text-align: left; color: #666;">{details}</td>
         </tr>
@@ -722,7 +723,7 @@ def send_daily_summary(history_dir, mail_config, smtp_password, logger, target_d
                 </table>
                 
                 <h3 style="border-bottom: 2px solid #eee; padding-bottom: 10px; color: #555; margin-top: 30px;">Latest RMAN Jobs (from DB)</h3>
-                <div style="font-size: 11px; overflow-x: auto;">
+                <div style="font-size: 14px; overflow-x: auto;">
                     {rman_report_html}
                 </div>
                 
@@ -1160,19 +1161,43 @@ QUIT;
             transfer_start_time = datetime.now()
             transfer_overall_start = time.time()
             try:
+
+                # Fetch SCN for remote path suffix
+                current_scn = "UNKNOWN_SCN"
+                try:
+                    sql_scn = "SET HEADING OFF FEEDBACK OFF PAGESIZE 0\nSELECT current_scn FROM v$database;\nEXIT;\n"
+                    st, out_scn, err_scn = execute_oracle_sql(ssh_client, conn_str, sql_scn, logger, env_dict=env, quiet=True)
+                    if st == 0 and out_scn.strip().isdigit():
+                        current_scn = out_scn.strip()
+                except Exception as e:
+                    logger.warning(f"Failed to fetch SCN: {e}")
+
+                now = datetime.now()
+                month_str = now.strftime("%b").upper() # e.g. JUN
+                day_str = now.strftime("%d") # e.g. 27
+                remote_suffix = f"{month_str}/{day_str}/{current_scn}"
+                
                 remote_base = BACKUP_CONFIG["remote_dest"].split(":")[0]
                 remote_path = BACKUP_CONFIG["remote_dest"].split(":")[1]
-                remote_full_dest = f"{BACKUP_CONFIG['remote_dest']}/{day_name}"
+                remote_full_dest = f"{BACKUP_CONFIG['remote_dest']}/{remote_suffix}"
+                # Path only (without user@host) for reporting
+                remote_path_only = f"{remote_path}/{remote_suffix}"
+
 
                 if dry_run:
                     logger.info(f"[DRY-RUN] Would execute {transfer_method} to {remote_full_dest}")
                     transfer_elapsed, avg_speed, attempts = 0.5, 100.0, 1
                 else:
-                    # Depending on local vs ssh_client, ssh might need -o StrictHostKeyChecking=no
+                    os_type = BACKUP_CONFIG.get("os_type", "lin").lower()
                     ssh_prefix = f"ssh -o StrictHostKeyChecking=no {remote_base} "
-                    run_command_wrapper(ssh_client, f"{ssh_prefix} mkdir -p {remote_path}/{day_name}", logger, quiet=True)
+                    
+                    if os_type == "win":
+                        win_path = remote_path_only.replace("/", "\\")
+                        run_command_wrapper(ssh_client, f"{ssh_prefix} cmd /c mkdir \"{win_path}\"", logger, quiet=True)
+                    else:
+                        run_command_wrapper(ssh_client, f"{ssh_prefix} mkdir -p \"{remote_path_only}\"", logger, quiet=True)
+                        
                     if transfer_method == "scp":
-                        run_command_wrapper(ssh_client, f"{ssh_prefix} cmd /c mkdir \"{remote_path}\\{day_name}\"", logger, quiet=True)
                         transfer_elapsed, avg_speed, attempts, _ = run_scp(logger, ssh_client, full_path, remote_full_dest)
                     else:
                         transfer_elapsed, avg_speed, attempts, _ = run_rsync(logger, ssh_client, full_path, remote_full_dest)
@@ -1183,6 +1208,7 @@ QUIT;
                     "end_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     "operation": transfer_method.capitalize() if not dry_run else f"{transfer_method.capitalize()} (Dry-Run)",
                     "directory": remote_full_dest,
+                    "remote_path_only": remote_path_only,
                     "duration": format_duration(transfer_elapsed),
                     "transfer_speed_mbps": round(avg_speed, 2),
                     "total_attempts": attempts,
