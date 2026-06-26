@@ -104,6 +104,7 @@ Süreci çok daha kolay yönetmek ve her seferinde sanal ortam (`venv`) oluştur
 ./run.sh --dry-run
 ./run.sh --test-mail
 ./run.sh --test-transfer
+./run.sh --test-db
 
 # Farklı bir konfigürasyon dosyası ile çalıştırmak isterseniz:
 ./run.sh --config config-db2.yaml

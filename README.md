@@ -104,6 +104,7 @@ To manage the process much easier and avoid creating/activating a virtual enviro
 ./run.sh --dry-run
 ./run.sh --test-mail
 ./run.sh --test-transfer
+./run.sh --test-db
 
 # If you want to use a different configuration file:
 ./run.sh --config config-db2.yaml

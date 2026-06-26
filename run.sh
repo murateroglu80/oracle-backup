@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 # RMAN Backup Script Runner (with Virtual Environment)
-# Usage: ./run.sh [--dry-run] [--test-mail] [--test-transfer]
+# Usage: ./run.sh [--dry-run] [--test-mail] [--test-transfer] [--test-db]
 
 set -e
 

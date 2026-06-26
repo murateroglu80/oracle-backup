@@ -753,8 +753,8 @@ def send_daily_summary(history_dir, mail_config, smtp_password, logger, target_d
 # 9. MAIN
 # ============================================================
 
-def main(config_file="config.yaml", dry_run=False, test_mail=False, test_transfer=False):
-    config = load_config("config.yaml")
+def main(config_file="config.yaml", dry_run=False, test_mail=False, test_transfer=False, test_db=False):
+    config = load_config(config_file)
     TARGET_SERVER = config.get("TARGET_SERVER", {})
     ORACLE_CONFIG = config.get("ORACLE_CONFIG", {})
     BACKUP_CONFIG = config.get("BACKUP_CONFIG", {})
@@ -795,6 +795,47 @@ def main(config_file="config.yaml", dry_run=False, test_mail=False, test_transfe
     if VAULT_CONFIG.get("enabled"):
         db_creds = get_vault_db_credentials(VAULT_CONFIG, logger)
     if test_transfer: logger.info("=== STARTING TEST TRANSFER MODE ===")
+    
+    if test_db:
+        logger.info("=== STARTING DB TEST ===")
+        try:
+            if not db_creds:
+                logger.error("No DB credentials found from Vault. Cannot test DB connection.")
+                return
+            target_enabled = TARGET_SERVER.get("enabled", False)
+            ssh_client_test = None
+            if target_enabled:
+                ssh_client_test = get_ssh_client(TARGET_SERVER, logger)
+            
+            env = {}
+            for key, val in ORACLE_CONFIG.items():
+                env[key] = str(val)
+            oh = ORACLE_CONFIG.get("ORACLE_HOME", "")
+            env["PATH"] = f"/usr/sbin:{oh}/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
+            env["LD_LIBRARY_PATH"] = f"{oh}/lib:/lib:/usr/lib"
+            
+            user = db_creds["username"]
+            pwd = db_creds["password"]
+            host = db_creds.get("hostname") or db_creds.get("ip")
+            db = db_creds.get("db", "")
+            conn_str = f"{user}/\\"{pwd}\\"@{host}/{db} as sysdba"
+            
+            sql = "SET HEADING OFF FEEDBACK OFF PAGESIZE 0\\nSELECT sys_context('userenv','db_name') FROM dual;\\nEXIT;\\n"
+            cmd = f"echo \\"{sql}\\" | sqlplus -s '{conn_str}'"
+            
+            logger.info("Running test query on Database using Vault credentials...")
+            status, out, err = run_command_wrapper(ssh_client_test, cmd, logger, env_dict=env, quiet=True)
+            if status == 0:
+                db_name = out.strip()
+                logger.info(f"DB Test Successful! Connected to database: {db_name}")
+            else:
+                logger.error(f"DB Test Failed! Exit code {status}.\\nOutput: {out}\\nError: {err}")
+            
+            if ssh_client_test:
+                ssh_client_test.close()
+        except Exception as e:
+            logger.error(f"DB Test encountered an error: {e}")
+        return
     
     if test_mail:
         logger.info("=== STARTING TEST MAIL ===")
@@ -1205,6 +1246,7 @@ if __name__ == "__main__":
     parser.add_argument("--dry-run", action="store_true", help="Run the script without executing RMAN, Rsync/SCP, or modifying history.")
     parser.add_argument("--test-mail", action="store_true", help="Send a test email using the configured SMTP settings and exit.")
     parser.add_argument("--test-transfer", action="store_true", help="Run a quick backup of only the control file and transfer it via SCP/Rsync to test the remote connection.")
+    parser.add_argument("--test-db", action="store_true", help="Run a test query against the database using Vault credentials and exit.")
     args = parser.parse_args()
 
-    main(config_file=args.config, dry_run=args.dry_run, test_mail=args.test_mail, test_transfer=args.test_transfer)
+    main(config_file=args.config, dry_run=args.dry_run, test_mail=args.test_mail, test_transfer=args.test_transfer, test_db=args.test_db)
