@@ -151,6 +151,10 @@ def get_vault_secret(vault_config, logger):
             raise Exception("Vault authentication failed.")
         
         secret_path = vault_config.get("secret_path")
+        if not secret_path:
+            logger.error("Vault secret_path for SMTP is empty or not provided.")
+            return None
+            
         if secret_path.startswith("secret/data/"):
             secret_path = secret_path.replace("secret/data/", "")
         elif secret_path.startswith("secret/"):
