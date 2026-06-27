@@ -2,6 +2,11 @@
 
 All notable changes to the backup system are documented in this file.
 
+## [6.4.1] - 2026-06-27
+
+### Fixed
+- **RMAN Syntax Error:** Fixed an `RMAN-01009` syntax error that occurred during archivelog deletion when a Standby database was detected. The invalid `AND APPLIED ON ALL STANDBY` clause was removed from the `DELETE` command and replaced with the correct `CONFIGURE ARCHIVELOG DELETION POLICY` directive prior to execution.
+
 ## [6.4.0] - 2026-06-27
 
 ### Added
