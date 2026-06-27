@@ -1172,10 +1172,18 @@ QUIT;
                         conn_str = "/ as sysdba"
                     sql_scn = "SET HEADING OFF FEEDBACK OFF PAGESIZE 0\nSELECT current_scn FROM v$database;\nEXIT;\n"
                     st, out_scn, err_scn = execute_oracle_sql(ssh_client, conn_str, sql_scn, logger, env_dict=env, quiet=True)
-                    if st == 0 and out_scn.strip().isdigit():
-                        current_scn = out_scn.strip()
+                    if st == 0:
+                        # Extract the first purely numeric sequence found in the output to bypass SSH banners
+                        import re
+                        match = re.search(r'\b\d+\b', out_scn)
+                        if match:
+                            current_scn = match.group(0)
+                        else:
+                            logger.warning(f"Could not find a valid SCN in output: {out_scn}")
+                    else:
+                        logger.warning(f"SCN query failed (rc={st}): {err_scn}")
                 except Exception as e:
-                    logger.warning(f"Failed to fetch SCN: {e}")
+                    logger.warning(f"Exception fetching SCN: {e}")
 
                 now = datetime.now()
                 month_str = now.strftime("%b").upper() # e.g. JUN
