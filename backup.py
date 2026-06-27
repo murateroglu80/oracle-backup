@@ -1191,12 +1191,13 @@ QUIT;
                 day_str = now.strftime("%d") # e.g. 27
                 remote_suffix = f"{month_str}/{day_str}/{current_scn}"
                 
-                remote_base = BACKUP_CONFIG["remote_dest"].split(":")[0]
-                remote_path = BACKUP_CONFIG["remote_dest"].split(":")[1]
-                remote_full_dest = f"{BACKUP_CONFIG['remote_dest']}/{remote_suffix}"
+                remote_dest_parts = BACKUP_CONFIG["remote_dest"].split(":", 1)
+                remote_base = remote_dest_parts[0]
+                remote_path = remote_dest_parts[1] if len(remote_dest_parts) > 1 else ""
+                
+                remote_full_dest = f"{remote_base}:{remote_path}/{remote_suffix}"
                 # Path only (without user@host) for reporting
                 remote_path_only = f"{remote_path}/{remote_suffix}"
-
 
                 if dry_run:
                     logger.info(f"[DRY-RUN] Would execute {transfer_method} to {remote_full_dest}")
@@ -1205,11 +1206,26 @@ QUIT;
                     os_type = BACKUP_CONFIG.get("os_type", "lin").lower()
                     ssh_prefix = f"ssh -o StrictHostKeyChecking=no {remote_base} "
                     
-                    if os_type == "win":
-                        win_path = remote_path_only.replace("/", "\\")
-                        run_command_wrapper(ssh_client, f"{ssh_prefix} cmd /c mkdir \"{win_path}\"", logger, quiet=True)
-                    else:
-                        run_command_wrapper(ssh_client, f"{ssh_prefix} mkdir -p \"{remote_path_only}\"", logger, quiet=True)
+                    mkdir_success = False
+                    for mk_attempt in range(1, 4):
+                        if os_type == "win":
+                            win_path = remote_path_only.replace("/", "\\")
+                            if win_path.startswith("\\") and len(win_path) > 2 and win_path[2] == ":":
+                                win_path = win_path[1:]
+                            st, out, err = run_command_wrapper(ssh_client, f"{ssh_prefix} cmd /c mkdir \"{win_path}\"", logger, quiet=True)
+                        else:
+                            st, out, err = run_command_wrapper(ssh_client, f"{ssh_prefix} mkdir -p \"{remote_path_only}\"", logger, quiet=True)
+                            
+                        # Windows mkdir returns 1 if directory already exists
+                        if st == 0 or "already exists" in (out + err).lower() or "zaten var" in (out + err).lower():
+                            mkdir_success = True
+                            break
+                        else:
+                            logger.warning(f"Remote directory creation failed (Attempt {mk_attempt}/3). RC={st}, Err={err.strip() or out.strip()}")
+                            time.sleep(2)
+                            
+                    if not mkdir_success:
+                        logger.error(f"Failed to create remote directory '{remote_path_only}' after 3 attempts.")
                         
                     if transfer_method == "scp":
                         transfer_elapsed, avg_speed, attempts, _ = run_scp(logger, ssh_client, full_path, remote_full_dest)
