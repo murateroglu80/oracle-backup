@@ -611,21 +611,32 @@ def send_daily_summary(history_dir, mail_config, smtp_password, logger, target_d
 
     max_day_severity = 1
     html_rows = ""
+    success_count = 0
+    total_count = 0
     
-    for run in day_runs:
-        run_status = run.get('status', 'FAILED').upper()
-        run_severity = run.get('severity', 'INFO').upper()
-        if "FAILED" in run_status:
-            run_severity = "ERROR"
+    for i, run in enumerate(day_runs):
+        if run.get("is_deleted"): continue
+        total_count += 1
+        
+        run_status = run.get("status", "UNKNOWN").upper()
+        if run_status == "SUCCESS": success_count += 1
+        
+        run_severity = run.get("severity", "INFO").upper()
             
         run_score = severity_map.get(run_severity, 1)
         if run_score > max_day_severity:
             max_day_severity = run_score
 
-        color = "#005500"
-        if run_severity == "WARNING": color = "#856404"
-        if run_severity == "ERROR": color = "#cc0000"
-        row_color = "#f8f9fa" if run_status == "SUCCESS" else "#f8d7da"
+        # Status text color matching the second table
+        if "SUCCESS" in run_status or "COMPLETED" in run_status:
+            color = "#27ae60"
+        elif "FAIL" in run_status or "ERROR" in run_status:
+            color = "#e74c3c"
+        else:
+            color = "#f39c12"
+            
+        # Zebra striping
+        row_color = "#ffffff" if i % 2 == 0 else "#f9f9f9"
         
         details = run.get('errors_warnings', '-')
         if run.get("remote_backup"):
@@ -635,14 +646,14 @@ def send_daily_summary(history_dir, mail_config, smtp_password, logger, target_d
                 details += f" ({run.get('transfer_speed_mbps')} MB/s)"
 
         html_rows += f"""
-        <tr style="background-color: {row_color}; border-bottom: 1px solid #eee; font-size: 14px;">
-            <td style="padding: 8px; text-align: left;">{run.get('operation', 'Backup')}</td>
-            <td style="padding: 8px; text-align: left;">{run.get('start_time', run.get('run_time', '-'))} - {run.get('end_time', '-')}</td>
-            <td style="padding: 8px; text-align: right;">{run.get('duration', '-')}</td>
-            <td style="padding: 8px; text-align: right;">{run.get('size_gb', '0')} GB</td>
-            <td style="padding: 8px; text-align: left;">{run.get('remote_path_only', '-')}</td>
-            <td style="padding: 8px; text-align: center; font-weight: bold; color: {color};">{run_status}</td>
-            <td style="padding: 8px; text-align: left; color: #666;">{details}</td>
+        <tr style="background-color: {row_color}; border-bottom: 1px solid #ddd; font-size: 14px;">
+            <td style="padding: 10px; border: 1px solid #eee; text-align: left;">{run.get('operation', 'Backup')}</td>
+            <td style="padding: 10px; border: 1px solid #eee; text-align: left;">{run.get('start_time', run.get('run_time', '-'))} - {run.get('end_time', '-')}</td>
+            <td style="padding: 10px; border: 1px solid #eee; text-align: right;">{run.get('duration', '-')}</td>
+            <td style="padding: 10px; border: 1px solid #eee; text-align: right;">{run.get('size_gb', '0')} GB</td>
+            <td style="padding: 10px; border: 1px solid #eee; text-align: left; word-break: break-all;">{run.get('remote_path_only', '-')}</td>
+            <td style="padding: 10px; border: 1px solid #eee; text-align: center; font-weight: bold; color: {color};">{run_status}</td>
+            <td style="padding: 10px; border: 1px solid #eee; text-align: left; color: #666;">{details}</td>
         </tr>
         """
 
@@ -706,15 +717,16 @@ def send_daily_summary(history_dir, mail_config, smtp_password, logger, target_d
                 </table>
 
                 <h3 style="border-bottom: 2px solid #eee; padding-bottom: 10px; color: #555;">Execution Details</h3>
-                <table style="width: 100%; border-collapse: collapse;">
+                <table style="width: 100%; border-collapse: collapse; font-family: Arial, sans-serif; box-shadow: 0 1px 3px rgba(0,0,0,0.1);">
                     <thead>
-                        <tr style="background-color: #343a40; color: white;">
-                            <th style="padding: 12px; text-align: left;">Operation</th>
-                            <th style="padding: 12px; text-align: left;">Time (Start - End)</th>
-                            <th style="padding: 12px; text-align: right;">Duration</th>
-                            <th style="padding: 12px; text-align: right;">Size</th>
-                            <th style="padding: 12px; text-align: center;">Status</th>
-                            <th style="padding: 12px; text-align: left;">Details / Message</th>
+                        <tr style="background-color: #34495e; color: white;">
+                            <th style="width: 15%; padding: 12px; border: 1px solid #ddd; text-align: left;">Operation</th>
+                            <th style="width: 25%; padding: 12px; border: 1px solid #ddd; text-align: left;">Time (Start - End)</th>
+                            <th style="width: 10%; padding: 12px; border: 1px solid #ddd; text-align: right;">Duration</th>
+                            <th style="width: 10%; padding: 12px; border: 1px solid #ddd; text-align: right;">Size</th>
+                            <th style="width: 15%; padding: 12px; border: 1px solid #ddd; text-align: left;">Path</th>
+                            <th style="width: 10%; padding: 12px; border: 1px solid #ddd; text-align: center;">Status</th>
+                            <th style="width: 15%; padding: 12px; border: 1px solid #ddd; text-align: left;">Details</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -1325,13 +1337,13 @@ EXIT;"""
                     <table style="width: 100%; border-collapse: collapse; font-family: Arial, sans-serif; box-shadow: 0 1px 3px rgba(0,0,0,0.1);">
                       <thead>
                         <tr style="background-color: #34495e; color: white; text-align: left;">
-                          <th style="padding: 12px; border: 1px solid #ddd;">Session</th>
-                          <th style="padding: 12px; border: 1px solid #ddd;">Type</th>
-                          <th style="padding: 12px; border: 1px solid #ddd;">Status</th>
-                          <th style="padding: 12px; border: 1px solid #ddd;">Start Time</th>
-                          <th style="padding: 12px; border: 1px solid #ddd; text-align: right;">Read</th>
-                          <th style="padding: 12px; border: 1px solid #ddd; text-align: right;">Written</th>
-                          <th style="padding: 12px; border: 1px solid #ddd; text-align: right;">Duration</th>
+                          <th style="width: 15%; padding: 12px; border: 1px solid #ddd; text-align: left;">Session</th>
+                          <th style="width: 25%; padding: 12px; border: 1px solid #ddd; text-align: left;">Type</th>
+                          <th style="width: 10%; padding: 12px; border: 1px solid #ddd; text-align: center;">Status</th>
+                          <th style="width: 10%; padding: 12px; border: 1px solid #ddd; text-align: left;">Start Time</th>
+                          <th style="width: 15%; padding: 12px; border: 1px solid #ddd; text-align: right;">Read</th>
+                          <th style="width: 10%; padding: 12px; border: 1px solid #ddd; text-align: right;">Written</th>
+                          <th style="width: 15%; padding: 12px; border: 1px solid #ddd; text-align: right;">Duration</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -1347,7 +1359,7 @@ EXIT;"""
                             <tr style="background-color: {bg_color}; border-bottom: 1px solid #ddd; font-size: 14px;">
                                 <td style="padding: 10px; border: 1px solid #eee;">{parts[0]}</td>
                                 <td style="padding: 10px; border: 1px solid #eee;">{parts[1]}</td>
-                                <td style="padding: 10px; border: 1px solid #eee; font-weight: bold; color: {status_color};">{parts[2]}</td>
+                                <td style="padding: 10px; border: 1px solid #eee; text-align: center; font-weight: bold; color: {status_color};">{parts[2]}</td>
                                 <td style="padding: 10px; border: 1px solid #eee;">{parts[3]}</td>
                                 <td style="padding: 10px; border: 1px solid #eee; text-align: right;">{parts[4]}</td>
                                 <td style="padding: 10px; border: 1px solid #eee; text-align: right;">{parts[5]}</td>
