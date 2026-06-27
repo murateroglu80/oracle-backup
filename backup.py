@@ -1013,9 +1013,9 @@ QUIT;
 
                     archivelog_deletion_cmd = f"DELETE NOPROMPT ARCHIVELOG ALL COMPLETED BEFORE 'SYSDATE-{ret_days}' BACKED UP 1 TIMES TO DISK;"
                     if has_standby:
-                        archivelog_deletion_cmd = "CONFIGURE ARCHIVELOG DELETION POLICY TO APPLIED ON ALL STANDBY;\\n" + archivelog_deletion_cmd
+                        archivelog_deletion_cmd = "CONFIGURE ARCHIVELOG DELETION POLICY TO APPLIED ON ALL STANDBY;\n" + archivelog_deletion_cmd
                     else:
-                        archivelog_deletion_cmd = "CONFIGURE ARCHIVELOG DELETION POLICY TO NONE;\\n" + archivelog_deletion_cmd
+                        archivelog_deletion_cmd = "CONFIGURE ARCHIVELOG DELETION POLICY TO NONE;\n" + archivelog_deletion_cmd
 
                     # If neither database nor archivelogs are being backed up, fallback to parallelism 1
                     if not is_true(RMAN_TEMPLATE.get("full_backup", True)) and not is_true(RMAN_TEMPLATE.get("archive_backup", True)):
