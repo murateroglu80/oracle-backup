@@ -1174,8 +1174,9 @@ QUIT;
                     st, out_scn, err_scn = execute_oracle_sql(ssh_client, conn_str, sql_scn, logger, env_dict=env, quiet=True)
                     if st == 0:
                         # Extract the first purely numeric sequence found in the output to bypass SSH banners
+                        # Use at least 5 digits to avoid matching OS/software versions (like '6' in 'Oracle Linux 6.10')
                         import re
-                        match = re.search(r'\b\d+\b', out_scn)
+                        match = re.search(r'\b\d{5,}\b', out_scn)
                         if match:
                             current_scn = match.group(0)
                         else:
