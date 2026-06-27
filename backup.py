@@ -1308,29 +1308,57 @@ QUIT;
             else:
                 conn_str = "/ as sysdba"
             
-            report_sql = """SET MARKUP HTML ON SPOOL ON ENTMAP OFF
-SET PAGESIZE 100 LINESIZE 200 TRIMSPOOL ON HEADING ON FEEDBACK OFF
-SELECT * FROM (
-SELECT 
-  rj.session_key,
-  rj.input_type,
-  rj.status,
-  TO_CHAR(rj.start_time, 'DD.MM.YYYY HH24:MI') AS baslangic,
-  rj.input_bytes_display    AS okunan,
-  rj.output_bytes_display   AS yazilan,
-  rj.time_taken_display     AS sure
-FROM v$rman_backup_job_details rj
-ORDER BY rj.start_time DESC
-) WHERE rownum <= 10;
+            report_sql = """SET HEADING OFF FEEDBACK OFF PAGESIZE 0 LINESIZE 1000
+SELECT rj.session_key || '|' || 
+       NVL(rj.input_type, '-') || '|' || 
+       NVL(rj.status, '-') || '|' || 
+       TO_CHAR(rj.start_time, 'DD.MM.YYYY HH24:MI') || '|' || 
+       NVL(rj.input_bytes_display, '0') || '|' || 
+       NVL(rj.output_bytes_display, '0') || '|' || 
+       NVL(rj.time_taken_display, '00:00:00')
+FROM (
+  SELECT * FROM v$rman_backup_job_details ORDER BY start_time DESC
+) rj WHERE rownum <= 10;
 EXIT;"""
             status, out, err = execute_oracle_sql(ssh_client, conn_str, report_sql, logger, env_dict=env, quiet=True)
             if status == 0:
-                # Clear out any unwanted lines before the HTML table
-                start_idx = out.find("<table")
-                if start_idx != -1:
-                    rman_report_html = out[start_idx:]
-                else:
-                    rman_report_html = out
+                lines = [line.strip() for line in out.splitlines() if '|' in line]
+                if lines:
+                    rman_report_html = """
+                    <h3 style="font-family: Arial, sans-serif; color: #333; margin-bottom: 10px;">Recent RMAN Backup Jobs</h3>
+                    <table style="width: 100%; border-collapse: collapse; font-family: Arial, sans-serif; box-shadow: 0 1px 3px rgba(0,0,0,0.1);">
+                      <thead>
+                        <tr style="background-color: #34495e; color: white; text-align: left;">
+                          <th style="padding: 12px; border: 1px solid #ddd;">Session</th>
+                          <th style="padding: 12px; border: 1px solid #ddd;">Type</th>
+                          <th style="padding: 12px; border: 1px solid #ddd;">Status</th>
+                          <th style="padding: 12px; border: 1px solid #ddd;">Start Time</th>
+                          <th style="padding: 12px; border: 1px solid #ddd; text-align: right;">Read</th>
+                          <th style="padding: 12px; border: 1px solid #ddd; text-align: right;">Written</th>
+                          <th style="padding: 12px; border: 1px solid #ddd; text-align: right;">Duration</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                    """
+                    for i, line in enumerate(lines):
+                        parts = [p.strip() for p in line.split('|')]
+                        if len(parts) >= 7:
+                            bg_color = "#ffffff" if i % 2 == 0 else "#f9f9f9"
+                            status_val = parts[2].upper()
+                            status_color = "#27ae60" if "COMPLETED" in status_val else ("#e74c3c" if "FAILED" in status_val else "#f39c12")
+                            
+                            rman_report_html += f"""
+                            <tr style="background-color: {bg_color}; border-bottom: 1px solid #ddd; font-size: 14px;">
+                                <td style="padding: 10px; border: 1px solid #eee;">{parts[0]}</td>
+                                <td style="padding: 10px; border: 1px solid #eee;">{parts[1]}</td>
+                                <td style="padding: 10px; border: 1px solid #eee; font-weight: bold; color: {status_color};">{parts[2]}</td>
+                                <td style="padding: 10px; border: 1px solid #eee;">{parts[3]}</td>
+                                <td style="padding: 10px; border: 1px solid #eee; text-align: right;">{parts[4]}</td>
+                                <td style="padding: 10px; border: 1px solid #eee; text-align: right;">{parts[5]}</td>
+                                <td style="padding: 10px; border: 1px solid #eee; text-align: right;">{parts[6]}</td>
+                            </tr>
+                            """
+                    rman_report_html += "</tbody></table>"
 
         # Send Daily Summary
         daily_mail_hour = MAIL_CONFIG.get("daily_mail_hour", 23)
