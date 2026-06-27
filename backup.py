@@ -1166,6 +1166,10 @@ QUIT;
                 # Fetch SCN for remote path suffix
                 current_scn = "UNKNOWN_SCN"
                 try:
+                    if db_creds:
+                        conn_str = f'{db_creds["username"]}/"{db_creds["password"]}"@{db_creds["hostname"]}/{db_creds["db"]} as sysdba'
+                    else:
+                        conn_str = "/ as sysdba"
                     sql_scn = "SET HEADING OFF FEEDBACK OFF PAGESIZE 0\nSELECT current_scn FROM v$database;\nEXIT;\n"
                     st, out_scn, err_scn = execute_oracle_sql(ssh_client, conn_str, sql_scn, logger, env_dict=env, quiet=True)
                     if st == 0 and out_scn.strip().isdigit():
