@@ -940,12 +940,6 @@ def main(config_file="config.yaml", dry_run=False, test_mail=False, test_transfe
         else:
             logger.info("TARGET_SERVER is disabled. Running all commands LOCALLY.")
 
-        daily_dir = os.path.join(BACKUP_CONFIG["backup_root"], day_name)
-        full_path = os.path.join(daily_dir, f"{hour:02d}")
-
-        if not dry_run:
-            run_command_wrapper(ssh_client, f"mkdir -p {full_path}", logger)
-
         env = {}
         for key, val in ORACLE_CONFIG.items():
             env[key] = str(val)
@@ -956,6 +950,33 @@ def main(config_file="config.yaml", dry_run=False, test_mail=False, test_transfe
         env["TMP"] = "/tmp"
         env["TMPDIR"] = "/tmp"
         oracle_sid = ORACLE_CONFIG.get("ORACLE_SID", "")
+        
+        current_scn = "UNKNOWN_SCN"
+        if not dry_run:
+            conn_str = "/ as sysdba"
+            if db_creds and db_creds.get("username") and db_creds.get("password"):
+                conn_str = f'{db_creds["username"]}/"{db_creds["password"]}"@{db_creds.get("hostname") or db_creds.get("ip")}/{db_creds.get("db", "")} as sysdba'
+            sql_scn = "SET HEADING OFF FEEDBACK OFF PAGESIZE 0 NUMFORMAT 999999999999999999\nSELECT TO_CHAR(current_scn) FROM v$database;\nEXIT;\n"
+            try:
+                st, out, err_scn = execute_oracle_sql(ssh_client, conn_str, sql_scn, logger, env_dict=env, quiet=True)
+                if st == 0:
+                    import re
+                    m = re.search(r'\b\d{5,}\b', out)
+                    if m: current_scn = m.group(0)
+            except Exception as e:
+                logger.warning(f"Exception fetching SCN: {e}")
+                
+        now = datetime.now()
+        month_str = now.strftime("%b").upper()
+        day_str = now.strftime("%d")
+        
+        daily_dir = os.path.join(BACKUP_CONFIG["backup_root"], month_str, day_str)
+        full_path = os.path.join(daily_dir, current_scn)
+
+        if not dry_run:
+            run_command_wrapper(ssh_client, f"mkdir -p {full_path}", logger)
+
+
 
         error_msg = None
         backup_start = datetime.now()
@@ -1162,34 +1183,9 @@ QUIT;
             transfer_start_time = datetime.now()
             transfer_overall_start = time.time()
             try:
-
-                # Fetch SCN for remote path suffix
-                current_scn = "UNKNOWN_SCN"
-                try:
-                    if db_creds:
-                        conn_str = f'{db_creds["username"]}/"{db_creds["password"]}"@{db_creds["hostname"]}/{db_creds["db"]} as sysdba'
-                    else:
-                        conn_str = "/ as sysdba"
-                    sql_scn = "SET HEADING OFF FEEDBACK OFF PAGESIZE 0 NUMFORMAT 999999999999999999\nSELECT TO_CHAR(current_scn) FROM v$database;\nEXIT;\n"
-                    st, out_scn, err_scn = execute_oracle_sql(ssh_client, conn_str, sql_scn, logger, env_dict=env, quiet=True)
-                    if st == 0:
-                        # Extract the first purely numeric sequence found in the output to bypass SSH banners
-                        # Use at least 5 digits to avoid matching OS/software versions (like '6' in 'Oracle Linux 6.10')
-                        import re
-                        match = re.search(r'\b\d{5,}\b', out_scn)
-                        if match:
-                            current_scn = match.group(0)
-                        else:
-                            logger.warning(f"Could not find a valid SCN in output: {out_scn}")
-                    else:
-                        logger.warning(f"SCN query failed (rc={st}): {err_scn}")
-                except Exception as e:
-                    logger.warning(f"Exception fetching SCN: {e}")
-
-                now = datetime.now()
-                month_str = now.strftime("%b").upper() # e.g. JUN
-                day_str = now.strftime("%d") # e.g. 27
-                remote_suffix = f"{month_str}/{day_str}/{current_scn}"
+                # remote_suffix should just be Month/Day. 
+                # scp and rsync will copy the local current_scn directory INTO this directory.
+                remote_suffix = f"{month_str}/{day_str}"
                 
                 remote_dest_parts = BACKUP_CONFIG["remote_dest"].split(":", 1)
                 remote_base = remote_dest_parts[0]
@@ -1237,8 +1233,8 @@ QUIT;
                     "start_time": transfer_start_time.strftime("%Y-%m-%d %H:%M:%S"),
                     "end_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     "operation": transfer_method.capitalize() if not dry_run else f"{transfer_method.capitalize()} (Dry-Run)",
-                    "directory": remote_full_dest,
-                    "remote_path_only": remote_path_only,
+                    "directory": f"{remote_full_dest}/{current_scn}",
+                    "remote_path_only": f"{remote_path_only}/{current_scn}",
                     "duration": format_duration(transfer_elapsed),
                     "transfer_speed_mbps": round(avg_speed, 2),
                     "total_attempts": attempts,
