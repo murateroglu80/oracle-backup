@@ -2,6 +2,15 @@
 
 All notable changes to the backup system are documented in this file.
 
+## [6.7.2] - 2026-06-30
+
+### Added
+- **RMAN SQL Fallback Validation:** Implemented an intelligent secondary validation mechanism for RMAN executions. If RMAN reports an error but the OS exit code is `0`, the script securely connects to the database using Vault credentials (without `as sysdba`) and queries `v$rman_backup_job_details`. If the database confirms the backup is `COMPLETED`, the script gracefully ignores the benign RMAN errors and proceeds normally instead of crashing.
+
+### Fixed
+- **Missing RMAN Report in Failed Emails:** Fixed an issue where the "Recent RMAN Backup Jobs" HTML table was not appended to notification emails if the backup had failed. The report is now unconditionally generated and embedded in the email regardless of script success/failure status.
+- **Expanded Ignore List:** Added `RMAN-08120` and `RMAN-08137` to the explicit ignore list to prevent false positive failures on standby database queries.
+
 ## [6.7.1] - 2026-06-30
 
 ### Fixed
