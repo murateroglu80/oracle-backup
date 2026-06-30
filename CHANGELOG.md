@@ -2,6 +2,24 @@
 
 All notable changes to the backup system are documented in this file.
 
+## [6.7.1] - 2026-06-30
+
+### Fixed
+- **Cleanup Routine Crash (TypeError):** Fixed a fatal bug in the routine cleanup process by passing the required `oracle_sid` parameter to `list_daily_dirs`. Also updated the logic to prevent the active backup directory from incorrectly deleting itself.
+- **Remote Transfer Duplication:** Fixed an issue where SCP/Rsync would mistakenly double-nest the `DDMMYY` folders during remote transfers. The script now smartly targets the parent `ORACLE_SID/MONTH` directory for physical transfer while reporting the correct full path in the logs.
+
+## [6.7.0] - 2026-06-30
+
+### Added
+- **Clean Directory Architecture:** Completely redesigned the backup directory structure to strictly follow the `ORACLE_SID/MONTH/DDMMYY` format (e.g., `ORCL/JUL/300626`) for both local and remote storage. 
+
+### Removed
+- **Hour & SCN Subfolders:** Eliminated all remnants of hour-based (`/12`) or SCN-based (`/60108...`) subdirectories. Backups now write directly to the clean `DDMMYY` directory.
+
+### Improved
+- **Smart Deep Cleanup:** Upgraded the space management and cleanup algorithm (`list_daily_dirs`) to safely scan 3 levels deep. It now precisely targets and deletes expired daily (`DDMMYY`) folders without accidentally deleting the parent `ORACLE_SID` or `MONTH` directories.
+- **Pre-execution Directory Creation:** Moved the local backup directory creation step to *after* the space management checks to prevent the active directory from being deleted by the cleanup routine before RMAN starts.
+
 ## [6.4.1] - 2026-06-27
 
 ### Fixed

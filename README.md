@@ -95,6 +95,20 @@ ssh-keygen -t rsa
 ssh-copy-id -i ~/.ssh/id_rsa.pub oracle@target_db_server
 ```
 
+## Directory Structure
+
+The script uses a clean, predictable, and robust directory structure for both local backup creation and remote file transfer. The structure automatically organizes backups by SID, Month, and Date, eliminating timezone-dependent hours or SCN clutter.
+
+Format:
+`{backup_root}/{ORACLE_SID}/{MONTH}/{DDMMYY}/`
+
+Example:
+`/backup/ORCL/JUL/300626/`
+
+This exact hierarchy is enforced consistently:
+- **Locally (Target Server):** Before RMAN execution, this directory is safely created. All `.rman`, `.arch`, and `.f` backup pieces are saved inside it.
+- **Remotely (Destination Server):** During SCP/Rsync transfers, the same structure is replicated dynamically inside the defined `remote_dest` parameter.
+
 ## Automated Installation and Execution (`run.sh`)
 
 To manage the process much easier and avoid creating/activating a virtual environment (`venv`) every time, you can use the `run.sh` script.

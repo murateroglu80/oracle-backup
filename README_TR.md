@@ -95,6 +95,20 @@ ssh-keygen -t rsa
 ssh-copy-id -i ~/.ssh/id_rsa.pub oracle@hedef_db_sunucusu
 ```
 
+## Dizin Yapısı (Directory Structure)
+
+Betik, hem yerel yedekleme hem de uzak sunucuya dosya transferi için son derece temiz, öngörülebilir ve sağlam bir dizin yapısı kullanır. Bu yapı, yedekleri otomatik olarak SID, Ay ve Gün bazında organize eder; saat veya SCN gibi karmaşık alt klasörleri ortadan kaldırır.
+
+Format:
+`{backup_root}/{ORACLE_SID}/{MONTH}/{DDMMYY}/`
+
+Örnek:
+`/backup/ORCL/JUL/300626/`
+
+Bu yapı her aşamada tutarlı bir şekilde korunur:
+- **Yerel (Hedef Sunucu):** RMAN çalışmadan önce bu dizin güvenle oluşturulur. Tüm `.rman`, `.arch` ve `.f` yedek parçaları doğrudan bu klasöre kaydedilir.
+- **Uzak Sunucu (Hedef Aktarım Noktası):** SCP/Rsync aktarımları sırasında aynı yapı, `remote_dest` parametresinin içinde dinamik olarak birebir kopyalanır.
+
 ## Otomatik Kurulum ve Çalıştırma (`run.sh`)
 
 Süreci çok daha kolay yönetmek ve her seferinde sanal ortam (`venv`) oluşturma/aktif etme ile uğraşmamak için `run.sh` betiğini kullanabilirsiniz.
