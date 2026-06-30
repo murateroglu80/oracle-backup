@@ -1196,17 +1196,21 @@ QUIT;
             transfer_start_time = datetime.now()
             transfer_overall_start = time.time()
             try:
-                # remote_suffix should be ORACLE_SID/MONTH
-                # scp and rsync will copy the local DDMMYY directory INTO this directory.
-                remote_suffix = f"{oracle_sid}/{month_name}"
+                # remote_suffix should be the exact final path: ORACLE_SID/MONTH/DDMMYY
+                remote_suffix = f"{oracle_sid}/{month_name}/{day_name_ddmmyy}"
+                # parent suffix for creating directories and scp target
+                remote_parent_suffix = f"{oracle_sid}/{month_name}"
                 
                 remote_dest_parts = BACKUP_CONFIG["remote_dest"].split(":", 1)
                 remote_base = remote_dest_parts[0]
                 remote_path = remote_dest_parts[1] if len(remote_dest_parts) > 1 else ""
                 
                 remote_full_dest = f"{remote_base}:{remote_path}/{remote_suffix}"
-                # Path only (without user@host) for reporting
+                remote_transfer_dest = f"{remote_base}:{remote_path}/{remote_parent_suffix}"
+                
+                # Path only (without user@host) for reporting and mkdir
                 remote_path_only = f"{remote_path}/{remote_suffix}"
+                remote_path_only_parent = f"{remote_path}/{remote_parent_suffix}"
 
                 if dry_run:
                     logger.info(f"[DRY-RUN] Would execute {transfer_method} to {remote_full_dest}")
@@ -1218,12 +1222,12 @@ QUIT;
                     mkdir_success = False
                     for mk_attempt in range(1, 4):
                         if os_type == "win":
-                            win_path = remote_path_only.replace("/", "\\")
+                            win_path = remote_path_only_parent.replace("/", "\\")
                             if win_path.startswith("\\") and len(win_path) > 2 and win_path[2] == ":":
                                 win_path = win_path[1:]
                             st, out, err = run_command_wrapper(ssh_client, f"{ssh_prefix} cmd /c mkdir \"{win_path}\"", logger, quiet=True)
                         else:
-                            st, out, err = run_command_wrapper(ssh_client, f"{ssh_prefix} mkdir -p \"{remote_path_only}\"", logger, quiet=True)
+                            st, out, err = run_command_wrapper(ssh_client, f"{ssh_prefix} mkdir -p \"{remote_path_only_parent}\"", logger, quiet=True)
                             
                         # Windows mkdir returns 1 if directory already exists
                         if st == 0 or "already exists" in (out + err).lower() or "zaten var" in (out + err).lower():
@@ -1237,17 +1241,17 @@ QUIT;
                         logger.error(f"Failed to create remote directory '{remote_path_only}' after 3 attempts.")
                         
                     if transfer_method == "scp":
-                        transfer_elapsed, avg_speed, attempts, _ = run_scp(logger, ssh_client, full_path, remote_full_dest)
+                        transfer_elapsed, avg_speed, attempts, _ = run_scp(logger, ssh_client, full_path, remote_transfer_dest)
                     else:
-                        transfer_elapsed, avg_speed, attempts, _ = run_rsync(logger, ssh_client, full_path, remote_full_dest)
+                        transfer_elapsed, avg_speed, attempts, _ = run_rsync(logger, ssh_client, full_path, remote_transfer_dest)
                 
                 transfer_record = {
                     "run_time": transfer_start_time.strftime("%Y-%m-%d %H:%M:%S"),
                     "start_time": transfer_start_time.strftime("%Y-%m-%d %H:%M:%S"),
                     "end_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     "operation": transfer_method.capitalize() if not dry_run else f"{transfer_method.capitalize()} (Dry-Run)",
-                    "directory": f"{remote_full_dest}/{day_name_ddmmyy}",
-                    "remote_path_only": f"{remote_path_only}/{day_name_ddmmyy}",
+                    "directory": remote_full_dest,
+                    "remote_path_only": remote_path_only,
                     "duration": format_duration(transfer_elapsed),
                     "transfer_speed_mbps": round(avg_speed, 2),
                     "total_attempts": attempts,
@@ -1285,8 +1289,8 @@ QUIT;
         # Routine Cleanup
         keep_days = BACKUP_CONFIG.get("keep_days", 7)
         cutoff = time.time() - keep_days * 86400
-        for bdir in list_daily_dirs(ssh_client, BACKUP_CONFIG["backup_root"]):
-            if bdir == daily_dir:
+        for bdir in list_daily_dirs(ssh_client, BACKUP_CONFIG["backup_root"], oracle_sid):
+            if bdir == full_path:
                 continue
             status, out, err = run_command_wrapper(ssh_client, f"stat -c %Y {bdir}", None, quiet=True)
             try:
