@@ -284,13 +284,29 @@ def get_dir_size_gb(ssh_client, path, logger=None):
         return 0
 
 def list_daily_dirs(ssh_client, backup_root):
-    status, out, err = run_command_wrapper(ssh_client, f"find {backup_root} -mindepth 1 -maxdepth 1 -type d -not -name 'logs' -printf '%p|%C@\n'", None, quiet=True)
+    cmd = f"find {backup_root} -mindepth 1 -maxdepth 3 -type d -not -path '*/logs*' -printf '%p|%C@\\n'"
+    status, out, err = run_command_wrapper(ssh_client, cmd, None, quiet=True)
     dirs = []
     for line in out.splitlines():
         if "|" in line:
             parts = line.split("|")
+            dir_path = parts[0].strip()
+            
+            # Determine relative path depth
             try:
-                dirs.append((parts[0], float(parts[1])))
+                rel_path = os.path.relpath(dir_path, backup_root)
+                path_parts = rel_path.replace("\\", "/").split("/")
+                
+                is_valid = False
+                # Old format matches: '27JUN2026' (depth 1)
+                if len(path_parts) == 1 and "202" in path_parts[0]:
+                    is_valid = True
+                # New format matches: 'JUN/27/6010832131274' (depth 3)
+                elif len(path_parts) == 3:
+                    is_valid = True
+                    
+                if is_valid:
+                    dirs.append((dir_path, float(parts[1])))
             except Exception:
                 pass
     dirs.sort(key=lambda x: x[1])
@@ -985,10 +1001,6 @@ def main(config_file="config.yaml", dry_run=False, test_mail=False, test_transfe
         daily_dir = os.path.join(BACKUP_CONFIG["backup_root"], month_str, day_str)
         full_path = os.path.join(daily_dir, current_scn)
 
-        if not dry_run:
-            run_command_wrapper(ssh_client, f"mkdir -p {full_path}", logger)
-
-
 
         error_msg = None
         backup_start = datetime.now()
@@ -1001,6 +1013,10 @@ def main(config_file="config.yaml", dry_run=False, test_mail=False, test_transfe
             space_ok, free_gb, required_gb = ensure_free_space(logger, ssh_client, env, BACKUP_CONFIG)
             if not space_ok:
                 raise RuntimeError("Insufficient disk space on target server.")
+
+            # Create backup directory after space check so it doesn't get cleaned up
+            if not dry_run:
+                run_command_wrapper(ssh_client, f"mkdir -p {full_path}", logger)
 
             # RMAN Backup
             parallelism = BACKUP_CONFIG.get("parallelism", 1)
