@@ -283,7 +283,7 @@ def get_dir_size_gb(ssh_client, path, logger=None):
             logger.warning(f"Could not determine dir size for '{path}': {e}. Returning 0 GB.")
         return 0
 
-def list_daily_dirs(ssh_client, backup_root):
+def list_daily_dirs(ssh_client, backup_root, oracle_sid):
     cmd = f"find {backup_root} -mindepth 1 -maxdepth 3 -type d -not -path '*/logs*' -printf '%p|%C@\\n'"
     status, out, err = run_command_wrapper(ssh_client, cmd, None, quiet=True)
     dirs = []
@@ -301,8 +301,11 @@ def list_daily_dirs(ssh_client, backup_root):
                 # Old format matches: '27JUN2026' (depth 1)
                 if len(path_parts) == 1 and "202" in path_parts[0]:
                     is_valid = True
-                # New format matches: 'JUN/27/6010832131274' (depth 3)
-                elif len(path_parts) == 3:
+                # Intermediate format matches: 'JUN/27/6010832131274' (depth 3, not starting with SID)
+                elif len(path_parts) == 3 and path_parts[0] != oracle_sid:
+                    is_valid = True
+                # New format matches: 'ORCL/JUL/300626' (depth 3, starting with SID)
+                elif len(path_parts) == 3 and path_parts[0] == oracle_sid:
                     is_valid = True
                     
                 if is_valid:
@@ -340,7 +343,7 @@ def get_required_gb(logger, backup_config):
     logger.info(f"No valid history found. Using fallback size: {fallback_gb:.1f} GB")
     return fallback_gb * (1 + buffer_pct)
 
-def ensure_free_space(logger, ssh_client, env, backup_config):
+def ensure_free_space(logger, ssh_client, env, backup_config, oracle_sid):
     backup_root = backup_config["backup_root"]
     history_dir = backup_config.get("history_dir")
     required_gb = get_required_gb(logger, backup_config)
@@ -360,7 +363,7 @@ def ensure_free_space(logger, ssh_client, env, backup_config):
     except RuntimeError:
         logger.warning("RMAN catalog cleanup failed during space reclamation. Continuing with directory removal.")
 
-    daily_dirs = list_daily_dirs(ssh_client, backup_root)
+    daily_dirs = list_daily_dirs(ssh_client, backup_root, oracle_sid)
     for old_dir in daily_dirs:
         if free_gb >= required_gb:
             break
@@ -978,29 +981,11 @@ def main(config_file="config.yaml", dry_run=False, test_mail=False, test_transfe
         env["TMP"] = "/tmp"
         env["TMPDIR"] = "/tmp"
         oracle_sid = ORACLE_CONFIG.get("ORACLE_SID", "")
-        
-        current_scn = "UNKNOWN_SCN"
-        if not dry_run:
-            conn_str = "/ as sysdba"
-            if db_creds and db_creds.get("username") and db_creds.get("password"):
-                conn_str = f'{db_creds["username"]}/"{db_creds["password"]}"@{db_creds.get("hostname") or db_creds.get("ip")}/{db_creds.get("db", "")} as sysdba'
-            sql_scn = "SET HEADING OFF FEEDBACK OFF PAGESIZE 0 NUMFORMAT 999999999999999999\nSELECT TO_CHAR(current_scn) FROM v$database;\nEXIT;\n"
-            try:
-                st, out, err_scn = execute_oracle_sql(ssh_client, conn_str, sql_scn, logger, env_dict=env, quiet=True)
-                if st == 0:
-                    import re
-                    m = re.search(r'\b\d{5,}\b', out)
-                    if m: current_scn = m.group(0)
-            except Exception as e:
-                logger.warning(f"Exception fetching SCN: {e}")
-                
         now = datetime.now()
-        month_str = now.strftime("%b").upper()
-        day_str = now.strftime("%d")
+        month_name = now.strftime("%b").upper()
+        day_name_ddmmyy = now.strftime("%d%m%y")
         
-        daily_dir = os.path.join(BACKUP_CONFIG["backup_root"], month_str, day_str)
-        full_path = os.path.join(daily_dir, current_scn)
-
+        full_path = os.path.join(BACKUP_CONFIG["backup_root"], oracle_sid, month_name, day_name_ddmmyy)
 
         error_msg = None
         backup_start = datetime.now()
@@ -1010,7 +995,7 @@ def main(config_file="config.yaml", dry_run=False, test_mail=False, test_transfe
 
         try:
             # Space Check
-            space_ok, free_gb, required_gb = ensure_free_space(logger, ssh_client, env, BACKUP_CONFIG)
+            space_ok, free_gb, required_gb = ensure_free_space(logger, ssh_client, env, BACKUP_CONFIG, oracle_sid)
             if not space_ok:
                 raise RuntimeError("Insufficient disk space on target server.")
 
@@ -1211,9 +1196,9 @@ QUIT;
             transfer_start_time = datetime.now()
             transfer_overall_start = time.time()
             try:
-                # remote_suffix should just be Month/Day. 
-                # scp and rsync will copy the local current_scn directory INTO this directory.
-                remote_suffix = f"{month_str}/{day_str}"
+                # remote_suffix should be ORACLE_SID/MONTH
+                # scp and rsync will copy the local DDMMYY directory INTO this directory.
+                remote_suffix = f"{oracle_sid}/{month_name}"
                 
                 remote_dest_parts = BACKUP_CONFIG["remote_dest"].split(":", 1)
                 remote_base = remote_dest_parts[0]
@@ -1261,8 +1246,8 @@ QUIT;
                     "start_time": transfer_start_time.strftime("%Y-%m-%d %H:%M:%S"),
                     "end_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     "operation": transfer_method.capitalize() if not dry_run else f"{transfer_method.capitalize()} (Dry-Run)",
-                    "directory": f"{remote_full_dest}/{current_scn}",
-                    "remote_path_only": f"{remote_path_only}/{current_scn}",
+                    "directory": f"{remote_full_dest}/{day_name_ddmmyy}",
+                    "remote_path_only": f"{remote_path_only}/{day_name_ddmmyy}",
                     "duration": format_duration(transfer_elapsed),
                     "transfer_speed_mbps": round(avg_speed, 2),
                     "total_attempts": attempts,
