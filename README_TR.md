@@ -105,7 +105,7 @@ Tüm gerçek yapılandırma dosyaları (`.example.yaml` hariç) `.gitignore`'da 
   - `key_file`: Şifresiz SSH erişimi için anahtar yolu (Örn: `~/.ssh/id_rsa`).
 - **ORACLE_CONFIG**: Veritabanı bağlantı detayları (ORACLE_HOME, SID, vb.).
   - Instance_id otomatik `host + SID` kombinasyonundan türetilir; elle override edilebilir.
-- **BACKUP_CONFIG**: 
+- **BACKUP_CONFIG**:
   - `backup_root`: Yedekleme kök dizini.
   - `log_dir`, `history_dir`, `pid_file`: Boş bırakılırsa instance_id ile otomatik namespace edilir.
   - `temp_dir`: SQL/RMAN geçici dosyaları için (örn. `/tmp`).
