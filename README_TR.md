@@ -1,14 +1,18 @@
-# Oracle RMAN Backup Script (Jump Server Edition)
+# Oracle RMAN Backup Script — Çok-Instance Sürümü (v7.x)
 
-Bu Python betiği, Oracle veritabanları için gelişmiş RMAN yedekleme otomasyonu sunar. **Jump Server (Merkezi Yönetim)** mimarisiyle çalışacak şekilde tasarlanmıştır. Bu sayede tüm veritabanı sunucularına tek tek Python kurmak yerine, betiği sadece bir merkezi sunucuda çalıştırarak tüm veritabanlarınızı uzaktan (SSH üzerinden) yönetebilirsiniz.
+Bu Python betiği, Oracle veritabanları için gelişmiş RMAN yedekleme otomasyonu sunar ve **Çok-Instance/Çok-Veritabanı Desteği** ile **Jump Server (Merkezi Yönetim)** mimarisiyle çalışacak şekilde tasarlanmıştır. Tüm veritabanı sunucularına tek tek Python kurmak yerine, betiği sadece bir merkezi sunucuda çalıştırarak tüm veritabanlarınızı uzaktan (SSH üzerinden) yönetebilirsiniz.
 
 ## Özellikler
-- **Merkezi Yönetim (Jump Server):** Loglar, geçmiş verileri (history) ve yapılandırmalar (Vault token dahil) tek bir güvenli sunucuda tutulur.
-- Yedekleme geçmişi tutma ve akıllı disk alanı yönetimi.
-- HashiCorp Vault entegrasyonu (SMTP ve DB kimlik bilgileri için).
+- **Çok-Instance/Çok-Veritabanı:** Farklı Oracle örnekleri (değişik SID'ler, değişik sunucular) tek bir codebase'den yönetin.
+- **Merkezi Yönetim (Jump Server):** Loglar, geçmiş verileri ve yapılandırmalar tek bir güvenli sunucuda tutulur.
+- **Org-Geneli Paylaşılmış Yapılandırma:** SMTP/monitoring ayarlarını tek `config/shared.yaml` dosyasında tanımlayın (her veritabanında tekrar yazmayın).
+- Yedekleme geçmişi (JSONL yapılandırılmış logging) ve akıllı disk alanı yönetimi.
+- **HashiCorp Vault, Lokal, veya Bağımsız mod:** Pluggable `SecretsProvider` ile DB & SMTP kimlik bilgileri (instance başına seçim).
+- **Watchdog Tabanlı Stall Tespiti:** RMAN/transfer ilerleme monitörleme, sabit zaman-aşımları yerine canlılık sinyalleri.
+- **Sunucu Bazlı Lock:** Aynı sunucudaki backupları serial hale getirerek RMAN çakışmasını önle.
 - Yedekleme sonrası e-posta özetlerine otomatik RMAN SQL raporu ekleme.
-- SCP/Rsync aracılığıyla hedef DB sunucusundan bir diğer uzak sunucuya yedek kopyalama.
-- Esnek yapılandırma desteği (Çoklu ortamlar için `--config` argümanı).
+- SCP/Rsync aracılığıyla uzak sunucuya yedek kopyalama.
+- `--status` ile fleet genel görünümü (instance durum tablosu).
 
 ## Gereksinimler
 
@@ -33,34 +37,91 @@ Bu Python betiği, Oracle veritabanları için gelişmiş RMAN yedekleme otomasy
    pip install -r requirements.txt
    ```
 
-## Yapılandırma (`config.yaml` ve `vault_config.yaml`)
+## Yapılandırma — Dosya Yapısı
 
-**Not:** Güvenlik ve esneklik amacıyla ayarlar iki dosyaya ayrılmıştır. 
-- Temel ayarlar için `config.example.yaml` dosyasını kopyalayarak `config.yaml` oluşturun.
-- Vault ve hassas veriler için `vault_config.yaml` dosyasını oluşturun. Bu dosyalar git takibinden çıkarılmıştır (`.gitignore`).
+```
+config/
+  config.example.yaml          # Instance-özgü ayarlar şablonu
+  shared.example.yaml          # Org-geneli MAIL/MONITORING şablonu (opsiyonel)
+  fleet.example.yaml           # Instance envanteri şablonu (opsiyonel)
+  <instance>.yaml              # Her instance için config.example.yaml'ın kopyası
 
-### Temel Ayarlar (`config.yaml`)
+secrets/
+  vault.example.yaml           # Vault yapılandırması (HashiCorp Vault kullanılıyorsa)
+  secrets_local.example.yaml   # Lokal credentials fallback (Vault yoksa)
+```
 
-- **TARGET_SERVER**: Scriptin SSH ile bağlanıp yedekleme işlemlerini (RMAN) tetikleyeceği asıl Oracle veritabanı sunucusu.
-  - `enabled`: `True` ise işlemler SSH ile Jump Server üzerinden yürütülür. `False` ise script **doğrudan çalıştığı makinede (Lokal)** tüm işlemleri (SSH kullanmadan) gerçekleştirir.
+### Hızlı Başlangıç
+
+1. Şablonları gerçek dosyalara kopyalayın:
+   ```bash
+   cp config/config.example.yaml config/ilk-db.yaml
+   cp config/shared.example.yaml config/shared.yaml     # Org-geneli (bir kez)
+   ```
+2. `config/ilk-db.yaml` dosyasını kendi veritabanınız için düzenleyin (ORACLE_SID, host, yollar).
+3. Vault kullanacaksanız: `secrets/vault.yaml` dosyasını Vault bağlantı bilgileriyle düzenleyin.
+4. Lokal credentials kullanacaksanız: `secrets/secrets_local.yaml` dosyasını plaintext kimlik bilgileriyle düzenleyin.
+
+Tüm gerçek yapılandırma dosyaları (`.example.yaml` hariç) `.gitignore`'da yer alır — commit etmek güvenlidir.
+
+### Yapılandırma Önceliği (Deep-Merge)
+- **Paylaşılmış (org-geneli):** `config/shared.yaml` — MAIL_CONFIG + MONITORING_CONFIG (bir yerde, tüm instanceler kullanır).
+- **Instance-özgü:** `config/<instance>.yaml` — diğer her şey (ORACLE_CONFIG, TARGET_SERVER, BACKUP_CONFIG, CREDENTIALS_CONFIG).
+- **Merge mantığı:** Instance config MAIL_CONFIG'i çıkarırsa shared'ı aynen kullanır. Kısmi override ederse instance anahtarları kazanır; shared'ın diğer alanları korunur.
+
+### Kullanım Örnekleri
+
+#### Tek bir instance'ı yedekle (dry-run)
+```bash
+./run.sh --config config/db-server1_orcl1.yaml --dry-run
+```
+
+#### Üretim yedeklemesi
+```bash
+./run.sh --config config/db-server1_prod2.yaml
+```
+
+#### E-posta ayarlarını sına
+```bash
+./run.sh --config config/db1.yaml --test-mail
+```
+
+#### Veritabanı bağlantısını sına
+```bash
+./run.sh --config config/db1.yaml --test-db
+```
+
+#### Tüm instancelerin durumunu gör (fleet view)
+```bash
+./run.sh --status
+```
+
+### Instance Yapılandırması (`config/<instance>.yaml`)
+
+- **TARGET_SERVER**: Scriptin SSH ile bağlanıp RMAN işlemlerini tetikleyeceği Oracle sunucusu.
+  - `enabled`: `True` ise SSH üzerinden (Jump Server'dan); `False` ise lokal makinede doğrudan çalış.
   - `host`: Veritabanı IP/Hostname
   - `user`: `oracle` veya yetkili kullanıcı
-  - `key_file`: Şifresiz SSH erişimi için anahtar yolunuz (Örn: `~/.ssh/id_rsa`).
-- **ORACLE_CONFIG**: Veritabanı bağlantı detayları ve ORACLE_HOME yolları.
+  - `key_file`: Şifresiz SSH erişimi için anahtar yolu (Örn: `~/.ssh/id_rsa`).
+- **ORACLE_CONFIG**: Veritabanı bağlantı detayları (ORACLE_HOME, SID, vb.).
+  - Instance_id otomatik `host + SID` kombinasyonundan türetilir; elle override edilebilir.
 - **BACKUP_CONFIG**: 
-  - `backup_root`: Hedef sunucudaki (veya Lokal makinedeki) yedekleme dizini (Örn: `/backup`).
-  - `log_dir` ve `history_dir`: Log ve geçmiş dosyalarının yolları. Tanımlanmazsa varsayılan olarak `~/huaris/logs` klasörleri otomatik olarak yaratılır.
-  - `device_type`: `DISK` veya `SBT_TAPE`.
-  - `parallelism`: Paralellik derecesi.
-  - `rman_script_file`: Eğer özel bir script kullanacaksanız bu dosyanın adı (Örn: `backup.rman`).
-  - `remote_dest`: Yedeklerin kopyalanacağı nihai uzak sunucu.
-  - `transfer_method`: Windows hedefler için `scp`, Linux için `rsync`.
-  - `transfer_hours`: Transfer saati veya her çalışmada transfer için `"all"`.
-  - `transfer_hours`: Transfer saati veya her çalışmada transfer için `"all"`.
-- **MAIL_CONFIG**: E-posta ayarları.
+  - `backup_root`: Yedekleme kök dizini.
+  - `log_dir`, `history_dir`, `pid_file`: Boş bırakılırsa instance_id ile otomatik namespace edilir.
+  - `temp_dir`: SQL/RMAN geçici dosyaları için (örn. `/tmp`).
+  - `watchdog`: Stall tespiti — output, DB progress, OS PID canlılığı monitörleme.
+  - `host_lock_enabled`: Aynı sunucudaki backupları serial hale getir.
+  - `transfer_method`: `scp` (Windows) veya `rsync` (Linux).
+  - `transfer_hours`: Transfer yapılacak saatler; `"all"` = her run'da.
 
-### Hassas Ayarlar (`vault_config.yaml`)
-- Vault sunucu adresi, token ve veritabanı ile SMTP şifrelerinin (`db_secret_path` ve `secret_path`) bulunduğu Vault dizinleri burada tanımlanır. Bu sayede DB bağlantılarında OS auth yerine güvenli Vault verileri kullanılır.
+### Kimlik Bilgileri (`CREDENTIALS_CONFIG`)
+
+Üç seçenek:
+1. **Vault:** `secrets/vault.yaml` — HashiCorp Vault'ta merkezi depolama (önerilir, production).
+2. **Lokal:** `secrets/secrets_local.yaml` — Plaintext credentials (dev/test, chmod 600 zorunlu).
+3. **Bağımsız:** `"none"` — Vault kullanmama; OS-auth veya parolasız bağlantı (test senaryoları).
+
+Detaylar için bkz. [VAULT_GUIDE.md](VAULT_GUIDE.md) ve `secrets/` dizin şablonları.
 
 ### En İyi Uygulama (Best Practice): RMAN Şablonu
 
