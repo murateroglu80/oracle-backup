@@ -1,8 +1,18 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Oracle RMAN Backup Script - v6.1.0 (Hybrid Jump/Local Server Edition)
-Advanced Refactoring:
+Oracle RMAN Backup Script - v7.0.0 (Multi-Instance Edition)
+
+Giriş noktası: argparse + main() orkestrasyon katmanı. Asıl mantık sorumluluk bazlı
+`modules/` paketi modüllerinde yaşar (config, connection, secrets, locking, history,
+space, rman, transfer, mailing, monitoring, logging_setup, utils).
+Yapılandırma (yaml) dosyaları `config/` dizininde tutulur.
+
+Bu sürüm SAF REFACTOR'dur: davranış v6.7.2 ile birebir aynıdır. Fonksiyonel değişiklikler
+(multi-instance, SecretsProvider soyutlaması, watchdog, structured logging, --status,
+host lock vb.) ayrı commit'lerde gelecek — bkz. oracle-backup-multi-instance-spec.md.
+
+Özellikler:
   1. Persistent Backup History with Monthly Rotation (JSON database).
   2. Centralized Jump Server Execution (Paramiko SSH) or Local Execution (Subprocess).
   3. Dynamic Log Generation & Safe SFTP Transfer.
@@ -16,810 +26,27 @@ Advanced Refactoring:
 import os
 import sys
 import argparse
-import subprocess
 import shutil
 import time
-import logging
 import smtplib
-import json
-import yaml
-import requests
-import re
-from datetime import datetime, timedelta
+from datetime import datetime
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.header import Header
 
-import hvac
-import paramiko
+from modules.config import load_config
+from modules.logging_setup import setup_logging
+from modules.connection import get_ssh_client, execute_oracle_sql, run_command_wrapper
+from modules.secrets import get_vault_secret, get_vault_db_credentials
+from modules.locking import acquire_lock, release_lock
+from modules.history import append_history, mark_history_deleted
+from modules.space import ensure_free_space, get_dir_size_gb, list_daily_dirs
+from modules.rman import check_standby_exists, run_rman
+from modules.transfer import run_scp, run_rsync
+from modules.monitoring import push_metrics
+from modules.mailing import send_daily_summary
+from modules.utils import format_duration
 
-
-def load_config(config_path="config.yaml"):
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    full_path = os.path.join(script_dir, config_path)
-    if not os.path.exists(full_path):
-        full_path = config_path
-        
-    if not os.path.exists(full_path):
-        print(f"[ERROR] Configuration file '{full_path}' not found!")
-        sys.exit(1)
-    try:
-        with open(full_path, "r", encoding="utf-8") as f:
-            config = yaml.safe_load(f)
-            
-        vault_config_path = os.path.join(script_dir, "vault_config.yaml")
-        if os.path.exists(vault_config_path):
-            with open(vault_config_path, "r", encoding="utf-8") as vf:
-                vault_cfg = yaml.safe_load(vf)
-                if vault_cfg and "VAULT_CONFIG" in vault_cfg:
-                    config["VAULT_CONFIG"] = vault_cfg["VAULT_CONFIG"]
-        
-        if "VAULT_CONFIG" not in config:
-            config["VAULT_CONFIG"] = {"enabled": False}
-            
-        return config
-    except Exception as e:
-        print(f"[ERROR] Failed to parse config file: {e}")
-        sys.exit(1)
-    try:
-        with open(full_path, "r", encoding="utf-8") as f:
-            return yaml.safe_load(f)
-    except Exception as e:
-        print(f"[ERROR] Failed to parse config file: {e}")
-        sys.exit(1)
-
-# ============================================================
-# 1. COMMAND EXECUTION (SSH & LOCAL)
-# ============================================================
-
-def execute_oracle_sql(ssh_client, conn_str, sql_content, logger, env_dict, timeout=None, quiet=True):
-    """Executes a SQL script over sqlplus safely by writing it to a temporary file via Heredoc."""
-    cmd = f"""SQL_TMP=$(mktemp /tmp/oracle_query_XXXXXX.sql)
-cat << 'EOF' > "$SQL_TMP"
-{sql_content}
-EOF
-sqlplus -s '{conn_str}' @"$SQL_TMP"
-rm -f "$SQL_TMP"
-"""
-    return run_command_wrapper(ssh_client, cmd, logger, env_dict=env_dict, timeout=timeout, quiet=quiet)
-
-def get_ssh_client(ssh_config, logger):
-    logger.info(f"Connecting to target server {ssh_config['host']} via SSH...")
-    client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    try:
-        if ssh_config.get("key_file"):
-            key_path = os.path.expanduser(ssh_config["key_file"])
-            client.connect(hostname=ssh_config["host"], port=ssh_config.get("port", 22),
-                           username=ssh_config["user"], key_filename=key_path)
-        else:
-            client.connect(hostname=ssh_config["host"], port=ssh_config.get("port", 22),
-                           username=ssh_config["user"], password=ssh_config.get("password"))
-        return client
-    except Exception as e:
-        logger.error(f"SSH connection failed: {e}")
-        sys.exit(1)
-
-def run_command_wrapper(ssh_client, cmd, logger, env_dict=None, timeout=None, quiet=False):
-    env_prefix = ""
-    if env_dict:
-        for k, v in env_dict.items():
-            env_prefix += f'export {k}="{v}"; '
-    full_cmd = env_prefix + cmd
-    
-    if not quiet and logger:
-        logger.debug(f"[CMD] {cmd}")
-        
-    if ssh_client:
-        stdin, stdout, stderr = ssh_client.exec_command(full_cmd, timeout=timeout)
-        out = stdout.read().decode('utf-8', errors='ignore')
-        err = stderr.read().decode('utf-8', errors='ignore')
-        status = stdout.channel.recv_exit_status()
-    else:
-        proc = subprocess.run(full_cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, executable='/bin/bash')
-        out = proc.stdout.decode('utf-8', errors='ignore')
-        err = proc.stderr.decode('utf-8', errors='ignore')
-        status = proc.returncode
-    
-    if not quiet and logger:
-        for line in out.splitlines():
-            logger.debug(f"  [STDOUT] {line}")
-        for line in err.splitlines():
-            logger.debug(f"  [STDERR] {line}")
-            
-    return status, out, err
-
-# ============================================================
-# 2. LOGGING
-# ============================================================
-
-def setup_logging(log_file):
-    logger = logging.getLogger("rman_backup")
-    logger.setLevel(logging.DEBUG)
-    fmt = logging.Formatter(
-        fmt="%(asctime)s [%(levelname)-8s] %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S"
-    )
-    fh = logging.FileHandler(log_file, encoding="utf-8")
-    fh.setLevel(logging.DEBUG)
-    fh.setFormatter(fmt)
-    ch = logging.StreamHandler(sys.stdout)
-    ch.setLevel(logging.INFO)
-    ch.setFormatter(fmt)
-    logger.addHandler(fh)
-    logger.addHandler(ch)
-    return logger
-
-# ============================================================
-# 3. VAULT INTEGRATION
-# ============================================================
-
-def get_vault_secret(vault_config, logger):
-    logger.info("Connecting to HashiCorp Vault to fetch SMTP credentials...")
-    try:
-        client = hvac.Client(url=vault_config.get("url"), token=vault_config.get("token"))
-        if not client.is_authenticated():
-            raise Exception("Vault authentication failed.")
-        
-        secret_path = vault_config.get("secret_path")
-        if not secret_path:
-            logger.error("Vault secret_path for SMTP is empty or not provided.")
-            return None
-            
-        parts = secret_path.strip("/").split("/", 1)
-        mount_point = parts[0] if len(parts) > 1 else "secret"
-        path = parts[1] if len(parts) > 1 else parts[0]
-        if path.startswith("data/"):
-            path = path[5:]
-            
-        read_response = client.secrets.kv.v2.read_secret_version(
-            mount_point=mount_point,
-            path=path,
-            raise_on_deleted_version=True
-        )
-        password = read_response['data']['data'].get('smtp_password')
-        if not password:
-            password = read_response['data']['data'].get('password')
-            
-        if not password:
-            raise Exception("SMTP password key not found in Vault secret.")
-        logger.info("SMTP credentials retrieved successfully.")
-        return password
-    except Exception as e:
-        logger.error(f"Vault connection or secret retrieval failed: {e}")
-        sys.exit(1)
-
-
-def get_vault_db_credentials(vault_config, logger):
-    if not vault_config.get("enabled", False) or not vault_config.get("db_secret_path"):
-        return None
-    logger.info("Connecting to HashiCorp Vault to fetch DB credentials...")
-    try:
-        client = hvac.Client(url=vault_config.get("url"), token=vault_config.get("token"))
-        if not client.is_authenticated():
-            raise Exception("Vault authentication failed.")
-        
-        secret_path = vault_config.get("db_secret_path")
-        parts = secret_path.strip("/").split("/", 1)
-        mount_point = parts[0] if len(parts) > 1 else "secret"
-        path = parts[1] if len(parts) > 1 else parts[0]
-        if path.startswith("data/"):
-            path = path[5:]
-            
-        read_response = client.secrets.kv.v2.read_secret_version(
-            mount_point=mount_point,
-            path=path,
-            raise_on_deleted_version=True
-        )
-        data = read_response['data']['data']
-        logger.info("DB credentials retrieved successfully.")
-        return data
-    except Exception as e:
-        logger.error(f"Vault DB credentials retrieval failed: {e}")
-        return None
-
-# ============================================================
-# 4. PROCESS LOCK
-# ============================================================
-
-def acquire_lock(pid_file, retries=3, wait=30):
-    if os.path.exists(pid_file):
-        try:
-            with open(pid_file) as f:
-                old_pid = int(f.read().strip())
-
-            for attempt in range(1, retries + 1):
-                if os.path.exists(f"/proc/{old_pid}"):
-                    print(f"[INFO] Another process (PID {old_pid}) is running. Waiting {wait}s...")
-                    time.sleep(wait)
-                else:
-                    print(f"[INFO] Stale PID file found. Removing lock.")
-                    os.remove(pid_file)
-                    break
-            else:
-                return False, old_pid
-        except (ValueError, OSError):
-            try:
-                os.remove(pid_file)
-            except OSError:
-                pass
-
-    try:
-        with open(pid_file, "w") as f:
-            f.write(str(os.getpid()))
-        return True, os.getpid()
-    except OSError as e:
-        print(f"[WARNING] Could not write PID file: {e}")
-        return True, os.getpid()
-
-def release_lock(pid_file):
-    try:
-        if os.path.exists(pid_file):
-            os.remove(pid_file)
-    except OSError:
-        pass
-
-# ============================================================
-# 5. DISK SPACE MANAGEMENT
-# ============================================================
-
-def get_free_gb(ssh_client, path, logger=None):
-    status, out, err = run_command_wrapper(ssh_client, f"df -k {path} | awk 'NR==2 {{print $4}}'", None, quiet=True)
-    try:
-        kb = int(out.strip())
-        return kb / (1024 ** 2)
-    except Exception as e:
-        if logger:
-            logger.warning(f"Could not determine free space for '{path}': {e}. Returning 0 GB.")
-        return 0
-
-def get_dir_size_gb(ssh_client, path, logger=None):
-    status, out, err = run_command_wrapper(ssh_client, f"du -sk {path} | awk '{{print $1}}'", None, quiet=True)
-    try:
-        kb = int(out.strip())
-        return kb / (1024 ** 2)
-    except Exception as e:
-        if logger:
-            logger.warning(f"Could not determine dir size for '{path}': {e}. Returning 0 GB.")
-        return 0
-
-def list_daily_dirs(ssh_client, backup_root, oracle_sid):
-    cmd = f"find {backup_root} -mindepth 1 -maxdepth 3 -type d -not -path '*/logs*' -printf '%p|%C@\\n'"
-    status, out, err = run_command_wrapper(ssh_client, cmd, None, quiet=True)
-    dirs = []
-    for line in out.splitlines():
-        if "|" in line:
-            parts = line.split("|")
-            dir_path = parts[0].strip()
-            
-            # Determine relative path depth
-            try:
-                rel_path = os.path.relpath(dir_path, backup_root)
-                path_parts = rel_path.replace("\\", "/").split("/")
-                
-                is_valid = False
-                # Old format matches: '27JUN2026' (depth 1)
-                if len(path_parts) == 1 and "202" in path_parts[0]:
-                    is_valid = True
-                # Intermediate format matches: 'JUN/27/6010832131274' (depth 3, not starting with SID)
-                elif len(path_parts) == 3 and path_parts[0] != oracle_sid:
-                    is_valid = True
-                # New format matches: 'ORCL/JUL/300626' (depth 3, starting with SID)
-                elif len(path_parts) == 3 and path_parts[0] == oracle_sid:
-                    is_valid = True
-                    
-                if is_valid:
-                    dirs.append((dir_path, float(parts[1])))
-            except Exception:
-                pass
-    dirs.sort(key=lambda x: x[1])
-    return [d[0] for d in dirs]
-
-def get_required_gb(logger, backup_config):
-    history_dir = backup_config.get("history_dir")
-    fallback_gb = backup_config["fallback_size_gb"]
-    buffer_pct  = backup_config["space_buffer_pct"]
-    
-    files_to_check = [
-        get_history_file(history_dir), 
-        get_history_file(history_dir, datetime.now() - timedelta(days=31))
-    ]
-    
-    for h_file in files_to_check:
-        if os.path.exists(h_file):
-            try:
-                with open(h_file, "r") as f:
-                    data = json.load(f)
-                for record in reversed(data):
-                    if record.get("operation") == "Backup" and record.get("status") == "SUCCESS":
-                        size = float(record.get("size_gb", 0))
-                        if size > 1.0:
-                            logger.info(f"Using required size from history ({h_file}): {size:.1f} GB")
-                            return size * (1 + buffer_pct)
-            except Exception as e:
-                logger.warning(f"Could not read history file {h_file}: {e}")
-                continue
-
-    logger.info(f"No valid history found. Using fallback size: {fallback_gb:.1f} GB")
-    return fallback_gb * (1 + buffer_pct)
-
-def ensure_free_space(logger, ssh_client, env, backup_config, oracle_sid, db_creds=None):
-    backup_root = backup_config["backup_root"]
-    history_dir = backup_config.get("history_dir")
-    required_gb = get_required_gb(logger, backup_config)
-    free_gb     = get_free_gb(ssh_client, backup_root, logger)
-
-    logger.info(f"Free disk space on target : {free_gb:.1f} GB  |  Required : {required_gb:.1f} GB")
-
-    if free_gb >= required_gb:
-        return True, free_gb, required_gb
-
-    logger.warning("Insufficient disk space! Removing oldest backup dirs from target...")
-
-    # Run RMAN catalog cleanup once before removing directories
-    rman_clean = "CROSSCHECK BACKUP; DELETE NOPROMPT EXPIRED BACKUP; DELETE NOPROMPT OBSOLETE; QUIT;"
-    try:
-        run_rman(logger, env, ssh_client, rman_clean, label="cleanup", db_creds=db_creds)
-    except RuntimeError:
-        logger.warning("RMAN catalog cleanup failed during space reclamation. Continuing with directory removal.")
-
-    daily_dirs = list_daily_dirs(ssh_client, backup_root, oracle_sid)
-    for old_dir in daily_dirs:
-        if free_gb >= required_gb:
-            break
-        run_command_wrapper(ssh_client, f"rm -rf {old_dir}", logger)
-        logger.info(f"Removed directory for space: {old_dir}")
-        mark_history_deleted(history_dir, old_dir)
-        free_gb = get_free_gb(ssh_client, backup_root, logger)
-
-    # Crosscheck again after physical removal to sync RMAN catalog
-    try:
-        run_rman(logger, env, ssh_client, "CROSSCHECK BACKUP; CROSSCHECK ARCHIVELOG ALL; QUIT;", label="post-cleanup-crosscheck", db_creds=db_creds)
-    except RuntimeError:
-        logger.warning("Post-cleanup crosscheck failed.")
-
-    if free_gb < required_gb:
-        logger.error("Could not free enough space. Backup aborted.")
-        return False, free_gb, required_gb
-
-    return True, free_gb, required_gb
-
-# ============================================================
-# 6. RMAN, RSYNC & ORACLE UTILS
-# ============================================================
-
-def format_duration(seconds):
-    h = int(seconds) // 3600
-    m = (int(seconds) % 3600) // 60
-    s = int(seconds) % 60
-    if h > 0: return f"{h}h {m:02d}m {s:02d}s"
-    return f"{m}m {s:02d}s"
-
-def check_standby_exists(logger, env, ssh_client, db_creds=None):
-    logger.info("Checking for Data Guard Standby existence via sqlplus...")
-    
-    if db_creds and db_creds.get("username") and db_creds.get("password"):
-        user = db_creds["username"]
-        pwd = db_creds["password"]
-        host = db_creds.get("hostname") or db_creds.get("ip")
-        db = db_creds.get("db", "")
-        conn_str = f'{user}/"{pwd}"@{host}/{db} as sysdba'
-    else:
-        conn_str = "/ as sysdba"
-        
-    sql = "SET HEADING OFF FEEDBACK OFF PAGESIZE 0\nSELECT COUNT(*) FROM v$archive_dest WHERE target='STANDBY' AND destination IS NOT NULL;\nEXIT;\n"
-    status, out, err = execute_oracle_sql(ssh_client, conn_str, sql, logger, env_dict=env, timeout=30, quiet=True)
-    if status == 0:
-        try:
-            count = int(out.strip())
-            if count > 0:
-                logger.info(f"Standby database detected ({count} destinations).")
-                return True
-        except ValueError:
-            pass
-    return False
-
-def run_rman(logger, env, ssh_client, rman_script, label="rman", db_creds=None):
-    start = time.time()
-    
-    logger.info(f"Executing RMAN Script ({label}):\n{rman_script}")
-    
-    # Fail-Fast wrapper: Preserve RC
-    # Use heredoc with 'EOF' (single-quoted) so shell does NO variable expansion
-    cmd = f"""RMAN_TMP=$(mktemp /tmp/rman_script_XXXXXX.rman)
-cat << 'EOF' > $RMAN_TMP
-{rman_script}
-EOF
-rman target / @$RMAN_TMP
-RC=$?
-rm -f $RMAN_TMP
-exit $RC"""
-    
-    status, out, err = run_command_wrapper(ssh_client, cmd, logger, env_dict=env, timeout=7200)
-    elapsed = time.time() - start
-    
-    # Check explicitly for RMAN/ORA errors in output even if RC=0
-    error_pattern = re.compile(r'(RMAN-\d+|ORA-\d+)')
-    found_error = False
-    
-    for line in (out + "\n" + err).splitlines():
-        if error_pattern.search(line):
-            if any(ignore in line for ignore in ["RMAN-00571", "RMAN-00569", "Recovery Manager complete", "WARNING:", "RMAN-08120", "RMAN-08137"]):
-                continue
-            found_error = True
-            break
-            
-    if found_error or status != 0:
-        full_out = out + "\n" + err
-        if "immutable" in full_out.lower() and "ORA-19509" in full_out:
-            if logger:
-                logger.warning(f"RMAN {label} reported an error, but it appears to be due to immutable backups preventing deletion. Ignoring error and treating as SUCCESS.")
-        elif found_error and status == 0 and db_creds and db_creds.get("username") and db_creds.get("password"):
-            user = db_creds["username"]
-            pwd = db_creds["password"]
-            host = db_creds.get("hostname") or db_creds.get("ip")
-            db = db_creds.get("db", "")
-            conn_str = f'{user}/"{pwd}"@{host}/{db}'
-            
-            sql = "SET HEADING OFF FEEDBACK OFF PAGESIZE 0\nSELECT status FROM (SELECT status FROM v$rman_backup_job_details ORDER BY start_time DESC) WHERE ROWNUM=1;\nEXIT;\n"
-            logger.info("RMAN output reported an error but OS exit code is 0. Running SQL fallback validation...")
-            sql_status, sql_out, sql_err = execute_oracle_sql(ssh_client, conn_str, sql, logger, env_dict=env, quiet=True)
-            
-            if sql_status == 0 and "COMPLETED" in sql_out.upper():
-                found_error = False
-                logger.info("RMAN çıktısında hata tespit edildi ancak v$rman_backup_job_details tablosu yedeğin COMPLETED olduğunu doğruladı. İşlem BAŞARILI kabul ediliyor.")
-            else:
-                raise RuntimeError(f"RMAN {label} failed (rc={status}). SQL validation also failed or did not report COMPLETED. See logs for ORA-/RMAN- errors.")
-        else:
-            raise RuntimeError(f"RMAN {label} failed (rc={status}). See logs for ORA-/RMAN- errors.")
-
-    return elapsed, out
-
-def run_rsync(logger, ssh_client, source_dir, remote_dest, max_retries=3, timeout=28800):
-    cmd = f"rsync -avz --progress --stats --partial {source_dir} {remote_dest}"
-    logger.info(f"rsync starting: {source_dir} --> {remote_dest}")
-    
-    overall_start = time.time()
-    for attempt in range(1, max_retries + 1):
-        start = time.time()
-        status, out, err = run_command_wrapper(ssh_client, cmd, logger, timeout=timeout)
-        total_elapsed = time.time() - overall_start
-
-        if status == 0:
-            def parse_rsync_bytes(line_str):
-                parts = line_str.split(":")
-                if len(parts) < 2: return 0
-                val = parts[1].strip().split()[0].replace(",", "")
-                suffixes = {"K": 1024, "M": 1024**2, "G": 1024**3, "T": 1024**4}
-                if val and val[-1].upper() in suffixes:
-                    try: return float(val[:-1]) * suffixes[val[-1].upper()]
-                    except ValueError: return 0
-                try: return float(val)
-                except ValueError: return 0
-
-            total_bytes = 0
-            for line in out.splitlines():
-                if "Total file size" in line:
-                    total_bytes = parse_rsync_bytes(line)
-                    break
-            avg_speed_mbps = (total_bytes / (1024 ** 2)) / total_elapsed if total_elapsed > 0 else 0
-            return total_elapsed, avg_speed_mbps, attempt, out
-            
-    raise RuntimeError(f"rsync failed after {max_retries} attempts.")
-
-def run_scp(logger, ssh_client, source_dir, remote_dest, max_retries=3, timeout=28800):
-    cmd = f"scp -r {source_dir} {remote_dest}"
-    logger.info(f"scp starting: {source_dir} --> {remote_dest}")
-    
-    overall_start = time.time()
-    for attempt in range(1, max_retries + 1):
-        start = time.time()
-        status, out, err = run_command_wrapper(ssh_client, cmd, logger, timeout=timeout)
-        total_elapsed = time.time() - overall_start
-
-        if status == 0:
-            total_bytes = get_dir_size_gb(ssh_client, source_dir) * (1024 ** 3)
-            avg_speed_mbps = (total_bytes / (1024 ** 2)) / total_elapsed if total_elapsed > 0 else 0
-            return total_elapsed, avg_speed_mbps, attempt, out
-            
-    raise RuntimeError(f"scp failed after {max_retries} attempts. Output: {err}")
-
-# ============================================================
-# 7. METRICS & MONITORING
-# ============================================================
-
-def push_metrics(logger, monitoring_config, oracle_sid, elapsed, free_gb, required_gb, success):
-    if not monitoring_config.get("enabled", False):
-        logger.info("Monitoring is disabled. Skipping metric push.")
-        return
-
-    monitor_type = monitoring_config.get("type", "").lower()
-    
-    if monitor_type == "prometheus":
-        url = monitoring_config.get("pushgateway_url")
-        if not url: return
-        data = (
-            f"backup_status{{db=\"{oracle_sid}\"}} {1 if success else 0}\n"
-            f"backup_duration_seconds{{db=\"{oracle_sid}\"}} {elapsed}\n"
-            f"backup_free_space_gb{{db=\"{oracle_sid}\"}} {free_gb}\n"
-            f"backup_required_space_gb{{db=\"{oracle_sid}\"}} {required_gb}\n"
-        )
-        try:
-            requests.post(url, data=data, timeout=10)
-            logger.info("Pushed metrics to Prometheus Pushgateway.")
-        except Exception as e:
-            logger.warning(f"Failed to push metrics to Prometheus: {e}")
-
-    elif monitor_type == "zabbix":
-        zabbix_server = monitoring_config.get("zabbix_server")
-        zabbix_host = monitoring_config.get("zabbix_host")
-        if not zabbix_server or not zabbix_host: return
-        metrics = [
-            (zabbix_host, "backup.status", 1 if success else 0),
-            (zabbix_host, "backup.duration", elapsed),
-            (zabbix_host, "backup.free_gb", free_gb),
-            (zabbix_host, "backup.required_gb", required_gb)
-        ]
-        try:
-            for host, key, val in metrics:
-                cmd = ["zabbix_sender", "-z", zabbix_server, "-s", host, "-k", key, "-o", str(val)]
-                subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
-            logger.info("Pushed metrics to Zabbix Server.")
-        except Exception as e:
-            logger.warning(f"Failed to push metrics to Zabbix: {e}")
-
-# ============================================================
-# 8. PERSISTENT HISTORY MANAGEMENT
-# ============================================================
-
-def get_history_file(history_dir, date_obj=None):
-    if date_obj is None:
-        date_obj = datetime.now()
-    filename = f"backup_history_{date_obj.strftime('%Y_%m')}.json"
-    return os.path.join(history_dir, filename)
-
-def get_history_file_for_dir(history_dir, dir_path):
-    try:
-        dir_name = os.path.basename(dir_path)
-        dt = datetime.strptime(dir_name, "%d%b%Y")
-        return get_history_file(history_dir, dt)
-    except Exception:
-        return get_history_file(history_dir)
-
-def append_history(history_dir, record):
-    h_file = get_history_file(history_dir)
-    data = []
-    if os.path.exists(h_file):
-        try:
-            with open(h_file, "r") as f:
-                data = json.load(f)
-        except Exception:
-            pass
-    data.append(record)
-    with open(h_file, "w") as f:
-        json.dump(data, f, indent=4)
-
-def mark_history_deleted(history_dir, deleted_dir_path):
-    h_file = get_history_file_for_dir(history_dir, deleted_dir_path)
-    if not os.path.exists(h_file):
-        return
-    try:
-        with open(h_file, "r") as f:
-            data = json.load(f)
-        
-        updated = False
-        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        for record in data:
-            if record.get("directory", "").startswith(deleted_dir_path):
-                if not record.get("is_deleted"):
-                    record["is_deleted"] = True
-                    record["deleted_at"] = now_str
-                    updated = True
-                    
-        if updated:
-            with open(h_file, "w") as f:
-                json.dump(data, f, indent=4)
-    except Exception:
-        pass
-
-def send_daily_summary(history_dir, mail_config, smtp_password, logger, target_date=None, target_server=None, oracle_config=None, backup_config=None, rman_report_html=""):
-    h_file = get_history_file(history_dir)
-    if not os.path.exists(h_file):
-        return
-
-    try:
-        with open(h_file, "r") as f:
-            runs = json.load(f)
-    except Exception:
-        return
-
-    if not target_date:
-        target_date = datetime.now().strftime("%Y-%m-%d")
-
-    day_runs = [r for r in runs if r.get("run_time", "").startswith(target_date)]
-    if not day_runs:
-        return
-
-    severity_map = {"INFO": 1, "WARNING": 2, "ERROR": 3}
-    notification_level = mail_config.get("notification_level", "INFO").upper()
-    min_severity_score = severity_map.get(notification_level, 1)
-
-    max_day_severity = 1
-    html_rows = ""
-    success_count = 0
-    total_count = 0
-    
-    for i, run in enumerate(day_runs):
-        if run.get("is_deleted"): continue
-        total_count += 1
-        
-        run_status = run.get("status", "UNKNOWN").upper()
-        if run_status == "SUCCESS": success_count += 1
-        
-        run_severity = run.get("severity", "INFO").upper()
-            
-        run_score = severity_map.get(run_severity, 1)
-        if run_score > max_day_severity:
-            max_day_severity = run_score
-
-        # Status text color matching the second table
-        if "SUCCESS" in run_status or "COMPLETED" in run_status:
-            color = "#27ae60"
-        elif "FAIL" in run_status or "ERROR" in run_status:
-            color = "#e74c3c"
-        else:
-            color = "#f39c12"
-            
-        # Zebra striping
-        row_color = "#ffffff" if i % 2 == 0 else "#f9f9f9"
-        
-        details = run.get('errors_warnings', '-')
-        if run.get("remote_backup"):
-            remote_status = "OK" if run.get("remote_complete") else "FAIL"
-            details = f"Remote: {remote_status} | {run.get('remote_fail_desc', details)}"
-            if run.get("transfer_speed_mbps"):
-                details += f" ({run.get('transfer_speed_mbps')} MB/s)"
-
-        html_rows += f"""
-        <tr style="background-color: {row_color}; border-bottom: 1px solid #ddd; font-size: 14px;">
-            <td style="padding: 10px; border: 1px solid #eee; text-align: left;">{run.get('operation', 'Backup')}</td>
-            <td style="padding: 10px; border: 1px solid #eee; text-align: left;">{run.get('start_time', run.get('run_time', '-'))} - {run.get('end_time', '-')}</td>
-            <td style="padding: 10px; border: 1px solid #eee; text-align: right;">{run.get('duration', '-')}</td>
-            <td style="padding: 10px; border: 1px solid #eee; text-align: right;">{run.get('size_gb', '0')} GB</td>
-            <td style="padding: 10px; border: 1px solid #eee; text-align: left; word-break: break-all;">{run.get('remote_path_only', '-')}</td>
-            <td style="padding: 10px; border: 1px solid #eee; text-align: center; font-weight: bold; color: {color};">{run_status}</td>
-            <td style="padding: 10px; border: 1px solid #eee; text-align: left; color: #666;">{details}</td>
-        </tr>
-        """
-
-    if max_day_severity < min_severity_score:
-        logger.info(f"Day max severity ({max_day_severity}) below notification level ({min_severity_score}). Skipping mail.")
-        return
-
-    final_severity_label = "INFO"
-    overall_status = "ALL OK"
-    status_color = "#28a745" # Green
-    
-    if max_day_severity == 2: 
-        final_severity_label = "WARNING"
-        overall_status = "WARNING / PARTIAL"
-        status_color = "#ffc107" # Yellow
-    elif max_day_severity == 3: 
-        final_severity_label = "ERROR"
-        overall_status = "ERROR / FAILED"
-        status_color = "#dc3545" # Red
-
-    subject = f"{mail_config['subject_prefix']} [{final_severity_label}] Daily Summary | {target_date}"
-    
-    # Extract info safely
-    oracle_sid = oracle_config.get("ORACLE_SID", "N/A") if oracle_config else "N/A"
-    
-    # Db host is either ORACLE_HOSTNAME or TARGET_SERVER host
-    db_host = "Unknown"
-    if oracle_config and oracle_config.get("ORACLE_HOSTNAME"):
-        db_host = oracle_config.get("ORACLE_HOSTNAME")
-    elif target_server and target_server.get("host"):
-        db_host = target_server.get("host")
-    else:
-        import socket
-        db_host = socket.gethostname()
-
-    # Transfer target is remote_dest in BACKUP_CONFIG
-    transfer_target = backup_config.get("remote_dest", "None") if backup_config else "None"
-
-    success_count = sum(1 for r in day_runs if r.get('status', '').upper() == 'SUCCESS')
-    total_count = len(day_runs)
-
-    html_body = f"""
-    <html>
-    <body style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; color: #333; line-height: 1.6;">
-        <div style="max-width: 950px; margin: 0 auto; border: 1px solid #ddd; border-radius: 8px; overflow: hidden;">
-            <div style="background-color: {status_color}; color: white; padding: 20px; text-align: center;">
-                <h2 style="margin: 0;">Oracle RMAN Backup Summary</h2>
-                <p style="margin: 5px 0 0 0;">Status: {overall_status} | Server: {db_host} | DB: {oracle_sid}</p>
-            </div>
-            
-            <div style="padding: 20px;">
-                <table style="width: 100%; border-collapse: collapse; margin-bottom: 20px;">
-                    <tr>
-                        <td style="width: 50%; padding: 10px; background: #f4f4f4;"><strong>Date:</strong> {target_date}</td>
-                        <td style="width: 50%; padding: 10px; background: #f4f4f4;"><strong>DB Hostname:</strong> {db_host}</td>
-                    </tr>
-                    <tr>
-                        <td style="padding: 10px;"><strong>Oracle SID:</strong> {oracle_sid}</td>
-                        <td style="padding: 10px;"><strong>Transfer Target:</strong> {transfer_target}</td>
-                    </tr>
-                </table>
-
-                <h3 style="border-bottom: 2px solid #eee; padding-bottom: 10px; color: #555;">Execution Details</h3>
-                <table style="width: 100%; border-collapse: collapse; font-family: Arial, sans-serif; box-shadow: 0 1px 3px rgba(0,0,0,0.1);">
-                    <thead>
-                        <tr style="background-color: #34495e; color: white;">
-                            <th style="width: 15%; padding: 12px; border: 1px solid #ddd; text-align: left;">Operation</th>
-                            <th style="width: 25%; padding: 12px; border: 1px solid #ddd; text-align: left;">Time (Start - End)</th>
-                            <th style="width: 10%; padding: 12px; border: 1px solid #ddd; text-align: right;">Duration</th>
-                            <th style="width: 10%; padding: 12px; border: 1px solid #ddd; text-align: right;">Size</th>
-                            <th style="width: 15%; padding: 12px; border: 1px solid #ddd; text-align: left;">Path</th>
-                            <th style="width: 10%; padding: 12px; border: 1px solid #ddd; text-align: center;">Status</th>
-                            <th style="width: 15%; padding: 12px; border: 1px solid #ddd; text-align: left;">Details</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {html_rows}
-                    </tbody>
-                </table>
-                
-                <h3 style="border-bottom: 2px solid #eee; padding-bottom: 10px; color: #555; margin-top: 30px;">Latest RMAN Jobs (from DB)</h3>
-                <div style="font-size: 14px; overflow-x: auto;">
-                    {rman_report_html}
-                </div>
-                
-                <div style="margin-top: 20px; font-size: 0.9em; color: #777; border-top: 1px solid #eee; padding-top: 10px;">
-                    Daily Overview: {success_count} Success / {total_count} Total runs today.<br>
-                    Notification Level: {notification_level}
-                </div>
-            </div>
-            <div style="background-color: #f4f4f4; padding: 10px; text-align: center; font-size: 0.8em; color: #999;">
-                This is an automated RMAN report generated at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}.
-            </div>
-        </div>
-    </body>
-    </html>
-    """
-
-    to_addrs_raw = mail_config.get("to_addrs", [])
-    if isinstance(to_addrs_raw, str):
-        # Handle string like "a@b.com; c@d.com" or "a@b.com,c@d.com"
-        to_addrs_list = [addr.strip() for addr in to_addrs_raw.replace(';', ',').split(',') if addr.strip()]
-    else:
-        to_addrs_list = to_addrs_raw
-
-    if not to_addrs_list:
-        logger.warning("No valid recipient addresses found. Skipping email.")
-        return
-
-    msg = MIMEMultipart("alternative")
-    msg["Subject"] = Header(subject, "utf-8")
-    msg["From"]    = mail_config["from_addr"]
-    msg["To"]      = ", ".join(to_addrs_list)
-    msg.attach(MIMEText(html_body, "html", "utf-8"))
-
-    try:
-        with smtplib.SMTP(mail_config["smtp_host"], mail_config["smtp_port"], timeout=30) as srv:
-            srv.ehlo()
-            if mail_config.get("use_tls"):
-                srv.starttls()
-                srv.ehlo()
-            if mail_config.get("use_auth", True):
-                srv.login(mail_config["smtp_user"], smtp_password)
-            srv.sendmail(mail_config["from_addr"], to_addrs_list, msg.as_string())
-        logger.info(f"Daily summary email sent successfully ([{final_severity_label}]).")
-    except Exception as e:
-        logger.error(f"Failed to send daily email: {e}")
-
-# ============================================================
-# 9. MAIN
-# ============================================================
 
 def main(config_file="config.yaml", dry_run=False, test_mail=False, test_transfer=False, test_db=False, test_query=None):
     config = load_config(config_file)
@@ -834,7 +61,7 @@ def main(config_file="config.yaml", dry_run=False, test_mail=False, test_transfe
     log_dir = os.path.expanduser(BACKUP_CONFIG.get("log_dir", "~/huaris/logs"))
     history_dir = os.path.expanduser(BACKUP_CONFIG.get("history_dir", "~/huaris/history"))
     pid_file = os.path.expanduser(BACKUP_CONFIG.get("pid_file", "/tmp/rman_backup.pid"))
-    
+
     os.makedirs(log_dir, exist_ok=True)
     os.makedirs(history_dir, exist_ok=True)
 
@@ -842,7 +69,7 @@ def main(config_file="config.yaml", dry_run=False, test_mail=False, test_transfe
     hour = now.hour
     day_name  = now.strftime("%d%b%Y").upper()
     file_name = now.strftime("%d%b%y%H").upper()
-    
+
     log_file = os.path.join(log_dir, f"backup_{file_name}.log")
 
     if dry_run or test_transfer:
@@ -856,14 +83,14 @@ def main(config_file="config.yaml", dry_run=False, test_mail=False, test_transfe
             os.symlink(log_file, latest_link)
         except Exception:
             pass
-    
+
     if dry_run: logger.info("=== STARTING IN DRY-RUN MODE ===")
-    
+
     db_creds = None
     if VAULT_CONFIG.get("enabled"):
         db_creds = get_vault_db_credentials(VAULT_CONFIG, logger)
     if test_transfer: logger.info("=== STARTING TEST TRANSFER MODE ===")
-    
+
 
     if test_query:
         logger.info(f"=== STARTING CUSTOM DB QUERY ===")
@@ -875,29 +102,29 @@ def main(config_file="config.yaml", dry_run=False, test_mail=False, test_transfe
             ssh_client_test = None
             if target_enabled:
                 ssh_client_test = get_ssh_client(TARGET_SERVER, logger)
-            
+
             env = {}
             for key, val in ORACLE_CONFIG.items():
                 env[key] = str(val)
             oh = ORACLE_CONFIG.get("ORACLE_HOME", "")
             env["PATH"] = f"/usr/sbin:{oh}/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
             env["LD_LIBRARY_PATH"] = f"{oh}/lib:/lib:/usr/lib"
-            
+
             user = db_creds["username"]
             pwd = db_creds["password"]
             host = db_creds.get("hostname") or db_creds.get("ip")
             db = db_creds.get("db", "")
             conn_str = f'{user}/"{pwd}"@{host}/{db} as sysdba'
-            
+
             sql = f"SET HEADING ON FEEDBACK ON\n{test_query}\nEXIT;\n"
-            
+
             logger.info("Executing custom query...")
             status, out, err = execute_oracle_sql(ssh_client_test, conn_str, sql, logger, env_dict=env, quiet=False)
             if status == 0:
                 logger.info(f"Query Result:\n{out}")
             else:
                 logger.error(f"Query Failed! Exit code {status}.\nOutput: {out}\nError: {err}")
-            
+
             if ssh_client_test:
                 ssh_client_test.close()
         except Exception as e:
@@ -914,22 +141,22 @@ def main(config_file="config.yaml", dry_run=False, test_mail=False, test_transfe
             ssh_client_test = None
             if target_enabled:
                 ssh_client_test = get_ssh_client(TARGET_SERVER, logger)
-            
+
             env = {}
             for key, val in ORACLE_CONFIG.items():
                 env[key] = str(val)
             oh = ORACLE_CONFIG.get("ORACLE_HOME", "")
             env["PATH"] = f"/usr/sbin:{oh}/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
             env["LD_LIBRARY_PATH"] = f"{oh}/lib:/lib:/usr/lib"
-            
+
             user = db_creds["username"]
             pwd = db_creds["password"]
             host = db_creds.get("hostname") or db_creds.get("ip")
             db = db_creds.get("db", "")
             conn_str = f'{user}/"{pwd}"@{host}/{db} as sysdba'
-            
+
             sql = "SET HEADING OFF FEEDBACK OFF PAGESIZE 0\nSELECT sys_context('userenv','db_name') FROM dual;\nEXIT;\n"
-            
+
             logger.info("Running test query on Database using Vault credentials...")
             status, out, err = execute_oracle_sql(ssh_client_test, conn_str, sql, logger, env_dict=env, quiet=True)
             if status == 0:
@@ -937,13 +164,13 @@ def main(config_file="config.yaml", dry_run=False, test_mail=False, test_transfe
                 logger.info(f"DB Test Successful! Connected to database: {db_name}")
             else:
                 logger.error(f"DB Test Failed! Exit code {status}.\nOutput: {out}\nError: {err}")
-            
+
             if ssh_client_test:
                 ssh_client_test.close()
         except Exception as e:
             logger.error(f"DB Test encountered an error: {e}")
         return
-    
+
     if test_mail:
         logger.info("=== STARTING TEST MAIL ===")
         if MAIL_CONFIG.get("enabled"):
@@ -1000,18 +227,18 @@ def main(config_file="config.yaml", dry_run=False, test_mail=False, test_transfe
         now = datetime.now()
         month_name = now.strftime("%b").upper()
         day_name_ddmmyy = now.strftime("%d%m%y")
-        
+
         full_path = os.path.join(BACKUP_CONFIG["backup_root"], oracle_sid, month_name, day_name_ddmmyy)
 
         error_msg = None
         backup_start = datetime.now()
         overall_start = time.time()
-        
+
         free_gb, required_gb = 0, 0
 
         try:
             # Space Check
-            space_ok, free_gb, required_gb = ensure_free_space(logger, ssh_client, env, BACKUP_CONFIG, oracle_sid, db_creds=db_creds)
+            space_ok, free_gb, required_gb = ensure_free_space(logger, ssh_client, env, BACKUP_CONFIG, oracle_sid, db_creds=db_creds, run_rman_fn=run_rman)
             if not space_ok:
                 raise RuntimeError("Insufficient disk space on target server.")
 
@@ -1024,7 +251,7 @@ def main(config_file="config.yaml", dry_run=False, test_mail=False, test_transfe
             device_type = BACKUP_CONFIG.get("device_type", "DISK").upper()
             rman_script_file = BACKUP_CONFIG.get("rman_script_file", "")
             RMAN_TEMPLATE = config.get("RMAN_TEMPLATE", {})
-            
+
             rman_script = None
             # Priority 1: Custom .rman file
             if rman_script_file:
@@ -1083,23 +310,23 @@ QUIT;
                     backup_cmds = ""
                     if is_true(RMAN_TEMPLATE.get("full_backup", True)):
                         backup_cmds += f"""
-  BACKUP AS COMPRESSED BACKUPSET FULL DATABASE 
-    TAG 'DATABASE_{file_name}' 
+  BACKUP AS COMPRESSED BACKUPSET FULL DATABASE
+    TAG 'DATABASE_{file_name}'
     FORMAT '{full_path}/Data_%d_%I_%s_%T_%U.rman';
 """
 
                     if is_true(RMAN_TEMPLATE.get("archive_backup", True)):
                         backup_cmds += f"""
   SQL 'ALTER SYSTEM ARCHIVE LOG CURRENT';
-  BACKUP AS COMPRESSED BACKUPSET 
-    TAG 'ARCHIVELOG_{file_name}' 
-    FORMAT '{full_path}/ARCH_%d_%I_%s_%T_%U.arch' 
+  BACKUP AS COMPRESSED BACKUPSET
+    TAG 'ARCHIVELOG_{file_name}'
+    FORMAT '{full_path}/ARCH_%d_%I_%s_%T_%U.arch'
     ARCHIVELOG ALL;
 """
                     if is_true(RMAN_TEMPLATE.get("controlfile_backup", True)):
                         backup_cmds += f"""
-  BACKUP AS COMPRESSED BACKUPSET CURRENT CONTROLFILE 
-    TAG 'CONTROLFILE_{file_name}' 
+  BACKUP AS COMPRESSED BACKUPSET CURRENT CONTROLFILE
+    TAG 'CONTROLFILE_{file_name}'
     FORMAT '{full_path}/CTL_%d_%T_%s_%p_ctlb';
 """
 
@@ -1127,8 +354,8 @@ QUIT;
                     spfile_cmd = ""
                     if is_true(RMAN_TEMPLATE.get("spfile_backup", True)):
                         spfile_cmd = f"""
-  BACKUP SPFILE 
-    TAG 'SPFILE_{file_name}' 
+  BACKUP SPFILE
+    TAG 'SPFILE_{file_name}'
     FORMAT '{full_path}/Spfile_%d_%I_%s_%T_%U.rman';
 """
 
@@ -1166,7 +393,7 @@ QUIT;
 
         backup_elapsed = time.time() - overall_start
         success_status = "FAILED" if error_msg else "SUCCESS"
-        
+
         history_record = {
             "run_time": backup_start.strftime("%Y-%m-%d %H:%M:%S"),
             "start_time": backup_start.strftime("%Y-%m-%d %H:%M:%S"),
@@ -1181,7 +408,7 @@ QUIT;
             "is_deleted": False,
             "deleted_at": None
         }
-        
+
         if dry_run:
             logger.info(f"[DRY-RUN] Would append history locally: {history_record}")
         else:
@@ -1205,7 +432,7 @@ QUIT;
         transfer_method = BACKUP_CONFIG.get("transfer_method", "rsync").lower()
 
         is_transfer_hour = (transfer_hours == "all" or transfer_hours == ["all"] or (isinstance(transfer_hours, list) and hour in transfer_hours))
-        
+
         # Only transfer if there was NO error
         if not error_msg and (is_transfer_hour or test_transfer):
             transfer_triggered = True
@@ -1216,14 +443,14 @@ QUIT;
                 remote_suffix = f"{oracle_sid}/{month_name}/{day_name_ddmmyy}"
                 # parent suffix for creating directories and scp target
                 remote_parent_suffix = f"{oracle_sid}/{month_name}"
-                
+
                 remote_dest_parts = BACKUP_CONFIG["remote_dest"].split(":", 1)
                 remote_base = remote_dest_parts[0]
                 remote_path = remote_dest_parts[1] if len(remote_dest_parts) > 1 else ""
-                
+
                 remote_full_dest = f"{remote_base}:{remote_path}/{remote_suffix}"
                 remote_transfer_dest = f"{remote_base}:{remote_path}/{remote_parent_suffix}"
-                
+
                 # Path only (without user@host) for reporting and mkdir
                 remote_path_only = f"{remote_path}/{remote_suffix}"
                 remote_path_only_parent = f"{remote_path}/{remote_parent_suffix}"
@@ -1234,7 +461,7 @@ QUIT;
                 else:
                     os_type = BACKUP_CONFIG.get("os_type", "lin").lower()
                     ssh_prefix = f"ssh -o StrictHostKeyChecking=no {remote_base} "
-                    
+
                     mkdir_success = False
                     for mk_attempt in range(1, 4):
                         if os_type == "win":
@@ -1244,7 +471,7 @@ QUIT;
                             st, out, err = run_command_wrapper(ssh_client, f"{ssh_prefix} cmd /c mkdir \"{win_path}\"", logger, quiet=True)
                         else:
                             st, out, err = run_command_wrapper(ssh_client, f"{ssh_prefix} mkdir -p \"{remote_path_only_parent}\"", logger, quiet=True)
-                            
+
                         # Windows mkdir returns 1 if directory already exists
                         if st == 0 or "already exists" in (out + err).lower() or "zaten var" in (out + err).lower():
                             mkdir_success = True
@@ -1252,15 +479,15 @@ QUIT;
                         else:
                             logger.warning(f"Remote directory creation failed (Attempt {mk_attempt}/3). RC={st}, Err={err.strip() or out.strip()}")
                             time.sleep(2)
-                            
+
                     if not mkdir_success:
                         logger.error(f"Failed to create remote directory '{remote_path_only}' after 3 attempts.")
-                        
+
                     if transfer_method == "scp":
-                        transfer_elapsed, avg_speed, attempts, _ = run_scp(logger, ssh_client, full_path, remote_transfer_dest)
+                        transfer_elapsed, avg_speed, attempts, _ = run_scp(logger, ssh_client, full_path, remote_transfer_dest, get_dir_size_fn=get_dir_size_gb)
                     else:
                         transfer_elapsed, avg_speed, attempts, _ = run_rsync(logger, ssh_client, full_path, remote_transfer_dest)
-                
+
                 transfer_record = {
                     "run_time": transfer_start_time.strftime("%Y-%m-%d %H:%M:%S"),
                     "start_time": transfer_start_time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -1324,7 +551,7 @@ QUIT;
         else:
             push_metrics(logger, MONITORING_CONFIG, oracle_sid, backup_elapsed, free_gb, required_gb, not bool(error_msg))
 
-        
+
         # RMAN Report Query
         rman_report_html = ""
         if not dry_run:
@@ -1336,14 +563,14 @@ QUIT;
                 conn_str = f'{user}/"{pwd}"@{host}/{db} as sysdba'
             else:
                 conn_str = "/ as sysdba"
-            
+
             report_sql = """SET HEADING OFF FEEDBACK OFF PAGESIZE 0 LINESIZE 1000
-SELECT rj.session_key || '|' || 
-       NVL(rj.input_type, '-') || '|' || 
-       NVL(rj.status, '-') || '|' || 
-       TO_CHAR(rj.start_time, 'DD.MM.YYYY HH24:MI') || '|' || 
-       NVL(rj.input_bytes_display, '0') || '|' || 
-       NVL(rj.output_bytes_display, '0') || '|' || 
+SELECT rj.session_key || '|' ||
+       NVL(rj.input_type, '-') || '|' ||
+       NVL(rj.status, '-') || '|' ||
+       TO_CHAR(rj.start_time, 'DD.MM.YYYY HH24:MI') || '|' ||
+       NVL(rj.input_bytes_display, '0') || '|' ||
+       NVL(rj.output_bytes_display, '0') || '|' ||
        NVL(rj.time_taken_display, '00:00:00')
 FROM (
   SELECT * FROM v$rman_backup_job_details ORDER BY start_time DESC
@@ -1375,7 +602,7 @@ EXIT;"""
                             bg_color = "#ffffff" if i % 2 == 0 else "#f9f9f9"
                             status_val = parts[2].upper()
                             status_color = "#27ae60" if "COMPLETED" in status_val else ("#e74c3c" if "FAILED" in status_val else "#f39c12")
-                            
+
                             rman_report_html += f"""
                             <tr style="background-color: {bg_color}; border-bottom: 1px solid #ddd; font-size: 14px;">
                                 <td style="padding: 10px; border: 1px solid #eee;">{parts[0]}</td>
@@ -1392,7 +619,7 @@ EXIT;"""
         # Send Daily Summary
         daily_mail_hour = MAIL_CONFIG.get("daily_mail_hour", 23)
         should_send_mail = (transfer_triggered or str(daily_mail_hour).lower() == "all" or hour == daily_mail_hour)
-        
+
         if should_send_mail and MAIL_CONFIG.get("enabled"):
             smtp_password = None
             if MAIL_CONFIG.get("use_auth", True):
@@ -1411,8 +638,9 @@ EXIT;"""
             ssh_client.close()
         release_lock(pid_file)
 
+
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Oracle RMAN Backup Script (Hybrid Jump/Local Server Edition)")
+    parser = argparse.ArgumentParser(description="Oracle RMAN Backup Script (Multi-Instance Edition)")
     parser.add_argument("--config", default="config.yaml", help="Path to the main configuration file.")
     parser.add_argument("--dry-run", action="store_true", help="Run the script without executing RMAN, Rsync/SCP, or modifying history.")
     parser.add_argument("--test-mail", action="store_true", help="Send a test email using the configured SMTP settings and exit.")
