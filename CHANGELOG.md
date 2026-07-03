@@ -2,6 +2,54 @@
 
 All notable changes to the backup system are documented in this file.
 
+## [Unreleased - v7.0.0 Draft]
+
+### Major: Multi-Instance Refactor (Faz 1 & 2)
+
+**Faz 1 (Saf Refactor, commit `5a5f0e1`):**
+- Split monolithic `backup.py` (1425 lines) into modular `modules/` package: config, connection, secrets, history, logging_setup, space, rman, transfer, mailing, monitoring, status, locking.
+- New directory structure: `config/` for instance YAML, `secrets/` (chmod 700) for credentials.
+- Config file discovery: relative/absolute → project root → `config/` directory.
+- Dependency injection to eliminate upper-layer cross-imports (spec §9.2).
+
+**Faz 2 (Functional, in progress):**
+- **Multi-Instance Architecture:** `instance_id` auto-derived from `host_SID` or explicit override; all paths auto-namespaced by instance (logs, history, PID, temp).
+- **Pluggable Credentials (spec §2):** `SecretsProvider` ABC with Vault, Local, Null, CyberArk-stub backends; instance-scoped lookups; fail-fast on missing instance (Local).
+- **Org-Wide Shared Config (spec §8.5):** `config/shared.yaml` for common MAIL_CONFIG + MONITORING_CONFIG (deep-merge per instance; instance overrides win; backward-compatible).
+- **Watchdog-Based Stall Detection (spec §11.4):** Replace hard timeouts with activity-based watchdog (Signals: output, DB v$rman_status, OS PID liveness).
+- **Structured Logging (spec §10):** Dual .log (human) + .jsonl (machine) with run_id, instance_id, phase tracking; on_record_written hook for ingest.
+- **Concurrent-Safe History (spec §5):** fcntl.flock + atomic write (os.replace); BackupRecord dataclass; schema_version=2; SKIPPED/FAILED history records.
+- **Host-Based Locking (spec §8.2):** `acquire_host_lock` via fcntl on temp_dir lockfile; serialize same-host backups.
+- **Fleet Status (spec §8.3-4):** `--status` mode reads fleet.yaml or config/*.yaml; markdown table; exit 0/1/2 codes.
+- **Credentials Config Backward-Compat (spec §2.8):** VAULT_CONFIG → CREDENTIALS_CONFIG alias; legacy vault_config.yaml auto-discovery.
+- **Backoff Retry on Transfer (spec §11.2):** Exponential backoff + log on rsync/scp failure.
+- **Watchdog DB Progress (§11.4):** v$rman_status mbytes_processed check (Kontrol 1; Kontrol 2-4 future).
+
+### Known Limitations (v7.0.0)
+- Watchdog SSH path untested (local path validated via offline smoke tests).
+- DB progress check via Kontrol 1 only; Kontrol 2-4 (session_longops, wait events, FRA) reserved for future.
+- CyberArk provider is stub; requires actual implementation.
+- fleet_runner orchestrator not in scope (UI phase).
+
+### Added (v7.0.0)
+- `config/shared.example.yaml` — org-wide MAIL/MONITORING template.
+- `config/fleet.example.yaml` — instance inventory template.
+- `secrets/vault.example.yaml` — Vault backends template (new VAULT_INSTANCES format).
+- `secrets/secrets_local.example.yaml` — local credentials fallback.
+- `modules/status.py` — fleet status collection & formatting.
+- `--status` command-line flag.
+
+### Changed (v7.0.0)
+- All modules moved to `modules/` (spec §9.1, not `rmanbackup/`).
+- Config files in `config/` (spec §8.1, not `conf.d/`).
+- `load_config()` now merges org-wide shared.yaml per instance.
+- `.gitignore` now ignores all `config/*.yaml` and `secrets/*` (except `*.example.yaml`).
+- Spec updated: all references to `rmanbackup/`, `conf.d/` → `modules/`, `config/`.
+
+### Removed (v7.0.0)
+- `config/vault_config.example.yaml` (replaced by `secrets/vault.example.yaml`; alias support for legacy files).
+- Single-timeout fixed 7200s from run_rman (replaced by watchdog).
+
 ## [6.7.2] - 2026-06-30
 
 ### Added

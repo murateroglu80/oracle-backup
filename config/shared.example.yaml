@@ -1,0 +1,36 @@
+# ============================================================
+# config/shared.yaml — ORG GENELİ ortak yapılandırma (spec §8.5)
+# Bu dosyayı 'shared.yaml' olarak kopyalayın. Tek kurumda e-posta ve monitoring hedefi
+# genelde tektir; burada BİR KEZ tanımlayın, her instance config'ine otomatik merge edilir.
+#
+# Öncelik: shared = taban (org varsayılanı), instance config = override (KAZANIR).
+#   - Bir instance ilgili section'ı hiç yazmazsa buradaki değerleri aynen kullanır.
+#   - Bir instance yalnızca override edilecek anahtarları yazabilir (deep-merge).
+#   - Liste alanları (örn. to_addrs) wholesale değiştirilir (merge edilmez).
+#
+# YALNIZCA org-geneli section'lar buraya konur (izinli: MAIL_CONFIG, MONITORING_CONFIG).
+# ORACLE_CONFIG / TARGET_SERVER / BACKUP_CONFIG gibi instance'a ÖZGÜ section'lar BURAYA KONMAZ
+# (konursa WARNING loglanır ve yok sayılır). shared.yaml yoksa davranış eskisiyle aynıdır.
+# ============================================================
+
+MAIL_CONFIG:
+  enabled: True
+  use_auth: True
+  notification_level: "INFO"       # INFO, WARNING, ERROR
+  smtp_host: "smtp.example.com"
+  smtp_port: 587
+  smtp_user: "noreply@example.com"
+  use_tls: True
+  from_addr: "noreply@example.com"
+  to_addrs:
+    - "dba-team@example.com"
+  subject_prefix: "[RMAN BACKUP]"
+  daily_mail_hour: 23              # Bu saatte özet mail; "all" = her run'dan sonra
+  # smtp_password: ""              # Tercihen Vault/Local secrets'tan gelir (get_smtp_password)
+
+MONITORING_CONFIG:
+  enabled: False
+  type: "prometheus"               # veya "zabbix"
+  pushgateway_url: "http://127.0.0.1:9091/metrics/job/oracle_backup"
+  zabbix_server: "127.0.0.1"
+  zabbix_host: "db-server.example.local"

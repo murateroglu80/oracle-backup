@@ -76,8 +76,9 @@ def list_daily_dirs(ssh_client, backup_root, oracle_sid):
     return [d[0] for d in dirs]
 
 
-def get_required_gb(logger, backup_config):
-    history_dir = backup_config.get("history_dir")
+def get_required_gb(logger, backup_config, history_dir):
+    # history_dir artık config'ten değil, resolved path'ten parametreyle gelir (spec §3.1) —
+    # namespacing'de config'te boş olabildiği için buradan okumak None -> TypeError riskiydi.
     fallback_gb = backup_config["fallback_size_gb"]
     buffer_pct  = backup_config["space_buffer_pct"]
 
@@ -105,10 +106,9 @@ def get_required_gb(logger, backup_config):
     return fallback_gb * (1 + buffer_pct)
 
 
-def ensure_free_space(logger, ssh_client, env, backup_config, oracle_sid, db_creds=None, run_rman_fn=None):
+def ensure_free_space(logger, ssh_client, env, backup_config, oracle_sid, history_dir, db_creds=None, run_rman_fn=None):
     backup_root = backup_config["backup_root"]
-    history_dir = backup_config.get("history_dir")
-    required_gb = get_required_gb(logger, backup_config)
+    required_gb = get_required_gb(logger, backup_config, history_dir)
     free_gb     = get_free_gb(ssh_client, backup_root, logger)
 
     logger.info(f"Free disk space on target : {free_gb:.1f} GB  |  Required : {required_gb:.1f} GB")

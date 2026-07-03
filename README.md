@@ -1,14 +1,18 @@
-# Oracle RMAN Backup Script (Jump Server Edition)
+# Oracle RMAN Backup Script — Multi-Instance Edition (v7.x)
 
-This Python script provides advanced RMAN backup automation for Oracle databases. It is designed to work with a **Jump Server (Centralized Management)** architecture. Instead of installing Python on every database server individually, you can run the script on a single centralized server and manage all your databases remotely (via SSH).
+Advanced RMAN backup automation for Oracle databases with **multi-instance/multi-database support**, designed for a **Jump Server (Centralized Management)** architecture. Run once on a centralized server and manage all your databases remotely (via SSH).
 
 ## Features
-- **Centralized Management (Jump Server):** Logs, historical data, and configurations (including Vault token) are kept on a single secure server.
-- Backup history tracking and smart disk space management.
-- HashiCorp Vault integration (for SMTP and DB credentials).
+- **Multi-Instance/Multi-Database:** Manage multiple Oracle instances (different SIDs, different servers) from a single codebase.
+- **Centralized Management (Jump Server):** Logs, historical data, and configurations are kept on a single secure server.
+- **Org-Wide Shared Config:** Common SMTP/monitoring settings in single `config/shared.yaml` (no per-database repetition).
+- Backup history tracking (JSONL structured logging + JSON file history) and smart disk space management.
+- **HashiCorp Vault, Local, or standalone mode** for DB & SMTP credentials (pluggable `SecretsProvider`).
+- **Watchdog-based stall detection:** Monitors RMAN/transfer progress with automatic stall timeout (instead of hard timeouts).
+- **Host-based locking:** Serializes backups on the same server to avoid concurrent RMAN conflicts.
 - Automatic RMAN SQL reporting embedded in post-backup email summaries.
-- Copy backups to another remote server via SCP/Rsync from the target DB server.
-- Flexible configuration support (`--config` argument for multiple environments).
+- Copy backups to another remote server via SCP/Rsync.
+- `--status` fleet overview (instance status table).
 
 ## Requirements
 
@@ -33,11 +37,37 @@ This Python script provides advanced RMAN backup automation for Oracle databases
    pip install -r requirements.txt
    ```
 
-## Configuration (`config.yaml` and `vault_config.yaml`)
+## Configuration
 
-**Note:** For security and flexibility, settings are split into two files.
-- Copy `config.example.yaml` to create `config.yaml` for main settings.
-- Create `vault_config.yaml` for Vault and sensitive data. These files are excluded from git tracking (`.gitignore`).
+### File Structure
+```
+config/
+  config.example.yaml          # Template for instance-specific settings
+  shared.example.yaml          # Template for org-wide MAIL/MONITORING (optional)
+  fleet.example.yaml           # Template for instance inventory (optional)
+  <instance>.yaml              # Copy of config.example.yaml, per instance
+
+secrets/
+  vault.example.yaml           # Vault configuration (if using HashiCorp Vault)
+  secrets_local.example.yaml   # Local secrets fallback (if not using Vault)
+```
+
+### Quick Start
+1. Copy templates to actual files:
+   ```bash
+   cp config/config.example.yaml config/your-db1.yaml
+   cp config/shared.example.yaml config/shared.yaml     # Org-wide (once per org)
+   ```
+2. Edit `config/your-db1.yaml` for your database (ORACLE_SID, host, paths).
+3. If using Vault: Edit `secrets/vault.yaml` with Vault connection details.
+4. If using local secrets: Edit `secrets/secrets_local.yaml` with plaintext credentials.
+
+All real configs (`.yaml`, not `.example.yaml`) are in `.gitignore` — safe to commit.
+
+### Config Priority
+- **Shared (org-wide):** `config/shared.yaml` — MAIL_CONFIG + MONITORING_CONFIG (one place, all instances use it).
+- **Instance-specific:** `config/<instance>.yaml` — everything else (ORACLE_CONFIG, TARGET_SERVER, BACKUP_CONFIG, CREDENTIALS_CONFIG).
+- **Deep-merge:** If instance config omits MAIL_CONFIG, it inherits from shared. If it includes a partial override, instance anahtarları wins; shared'ın diğer alanları korunur.
 
 ### Main Settings (`config.yaml`)
 
@@ -55,8 +85,8 @@ This Python script provides advanced RMAN backup automation for Oracle databases
   - `rman_script_file`: The name of the file if you are using a custom script (e.g., `backup.rman`).
   - `remote_dest`: The final remote server where backups will be copied.
   - `transfer_method`: `scp` for Windows targets, `rsync` for Linux.
-  - `transfer_hours`: Transfer hour, or `"all"` for transferring on every run.
-  - `transfer_hours`: Transfer hour, or `"all"` for transferring on every run.
+  - `transfer_hours`: Transfer hour(s), or `"all"` for transferring on every run.
+  - `watchdog`: Stall detection for long-running RMAN/transfer; see spec §11.4 for details.
 - **MAIL_CONFIG**: Email settings.
 
 ### Sensitive Settings (`vault_config.yaml`)

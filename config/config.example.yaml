@@ -1,3 +1,13 @@
+# ============================================================
+# oracle-backup v7.x — Multi-Instance örnek yapılandırması
+# Her instance (veritabanı) için config/<instance>.yaml olarak kopyalayın.
+# ============================================================
+
+# Opsiyonel: instance_id'yi elle override et. Boş/yok ise otomatik türetilir:
+#   f"{TARGET_SERVER.host}_{ORACLE_CONFIG.ORACLE_SID}" (sanitize edilir).
+# instance_id hem Vault lookup'ında hem log/history/pid namespacing'inde kullanılır.
+# INSTANCE_ID: "db-server1_orcl1"
+
 ORACLE_CONFIG:
   ORACLE_HOSTNAME: "db-server.example.local"
   ORACLE_UNQNAME: "ORCL"
@@ -12,7 +22,7 @@ GI_CONFIG:
   GRID_HOME: "/u01/app/19/grid"
 
 TARGET_SERVER:
-  enabled: False
+  enabled: False           # False = tüm komutlar LOKAL çalışır (host_lock anahtarı "local" olur)
   host: "db-server.example.local"
   user: "oracle"
   port: 22
@@ -20,19 +30,37 @@ TARGET_SERVER:
 
 BACKUP_CONFIG:
   backup_root: "/backup"
-  log_dir: "~/huaris/logs"
-  pid_file: "/tmp/rman_backup_ORCL.pid"
-  history_dir: "~/huaris/history"
+  # log_dir/history_dir/pid_file BOŞ bırakılırsa instance_id ile otomatik namespace edilir:
+  #   ~/huaris/logs/<instance_id>, ~/huaris/history/<instance_id>, /tmp/rman_backup_<instance_id>.pid
+  # Elle değer verilirse o değer olduğu gibi kullanılır (geriye dönük uyum).
+  log_dir: ""
+  history_dir: ""
+  pid_file: ""
+  temp_dir: "/tmp"         # SQL/RMAN geçici dosyaları (spec §4). Instance başına ayrılmaz.
   fallback_size_gb: 300
   space_buffer_pct: 0.20
   keep_days: 7
   remote_dest: "oracle@192.168.1.100:/share/oracle"
-  os_type: "lin" # Remote server OS type: "lin" or "win"
-  transfer_method: "scp" # "rsync" or "scp"
-  transfer_hours: [20] # List of hours like [20, 23], or "all" to transfer on every run
-  device_type: "DISK" # DISK or SBT_TAPE
+  os_type: "lin"           # Uzak sunucu OS: "lin" veya "win"
+  transfer_method: "scp"   # "rsync" veya "scp"
+  transfer_hours: [20]     # [20, 23] gibi liste ya da "all" (her run'da transfer)
+  device_type: "DISK"      # DISK veya SBT_TAPE
   parallelism: 4
-  rman_script_file: "" # Optional: path to custom .rman file. Empty = use RMAN_TEMPLATE
+  rman_script_file: ""     # Opsiyonel: özel .rman dosyası. Boş = RMAN_TEMPLATE kullan
+
+  # --- Host bazlı lock (spec §8.2): aynı host'a yedekleri serileştirir ---
+  host_lock_enabled: True
+  host_lock_timeout_min: 120
+
+  # --- Canlılık bazlı watchdog (spec §11.4): uzun RMAN/transfer stall tespiti ---
+  watchdog:
+    enabled: True                  # False = eski sınırsız-bekleme davranışı
+    idle_timeout_min: 30           # hiçbir sinyal yokken bu kadar dk = STALLED
+    progress_check_enabled: True   # Sinyal 2 (DB v$rman_status ilerleme sorgusu)
+    progress_check_interval_min: 5 # DB'yi yormamak için seyrek
+    os_pid_check_enabled: True     # Sinyal 3 (uzak süreç kill -0)
+    max_runtime_min: 0             # 0 = SINIRSIZ (opt-in mutlak üst sınır)
+    kill_on_stall: False           # stall'da uzak süreci öldürme girişimi (default kapalı)
 
 # RMAN Template - Her bölüm True/False ile açılıp kapatılabilir
 RMAN_TEMPLATE:
@@ -51,28 +79,40 @@ RMAN_TEMPLATE:
     delete_obsolete_orphan: True
     archive_retention_days: 2
   extra_commands: []
-  # extra_commands örnekleri:
-  #   - "BACKUP CURRENT CONTROLFILE FOR STANDBY FORMAT '{path}/Standby_CTL_%d_%T_%U.rman';"
-  #   - "VALIDATE BACKUPSET 123;"
 
+# --- Credentials (spec §2.7): provider seçimi GLOBAL'dir ---
+CREDENTIALS_CONFIG:
+  enabled: True
+  provider: "vault"                # "vault" | "local" | "cyberark" (henüz yok) | "none"
+  vault:
+    vault_file: "vault.yaml"       # secrets/ dizinine göre relatif VEYA mutlak path
+    instance_id: ""                # opsiyonel Vault-only override (spec §2.2.1 — normalde boş)
+  local:
+    secrets_file: "secrets_local.yaml"
+# Geriye dönük uyum: eski "VAULT_CONFIG:" bloğu / ayrı vault_config.yaml hâlâ desteklenir
+# (otomatik CREDENTIALS_CONFIG'e çevrilir). Bkz. spec Bölüm 6 migration.
+
+# MAIL_CONFIG ve MONITORING_CONFIG org geneli ise config/shared.yaml'a taşıyın (bir kez tanımlayın).
+# O zaman aşağıdaki blokları buradan TÜMÜYLE silebilir, ya da yalnızca bu instance için override
+# edilecek anahtarları bırakabilirsiniz (deep-merge: instance kazanır). Bkz. config/shared.example.yaml.
 MAIL_CONFIG:
   enabled: False
   use_auth: True
-  notification_level: "INFO" # INFO, WARNING, ERROR
+  notification_level: "INFO"       # INFO, WARNING, ERROR
   smtp_host: "smtp.example.com"
   smtp_port: 587
   smtp_user: "noreply@example.com"
   use_tls: True
   from_addr: "noreply@example.com"
-  to_addrs: 
+  to_addrs:
     - "dba-team@example.com"
   subject_prefix: "[RMAN BACKUP]"
-  daily_mail_hour: 23 # Send mail at this hour (e.g. 23) or set to "all" to send after every run
-
+  daily_mail_hour: 23              # Bu saatte mail; "all" = her run'dan sonra
+  smtp_password: ""                # provider "none"/local iken buradan da okunabilir
 
 MONITORING_CONFIG:
   enabled: False
-  type: "prometheus" # or "zabbix"
+  type: "prometheus"               # veya "zabbix"
   pushgateway_url: "http://127.0.0.1:9091/metrics/job/oracle_backup"
   zabbix_server: "127.0.0.1"
   zabbix_host: "db-server.example.local"

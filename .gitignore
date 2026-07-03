@@ -57,3 +57,10 @@ Thumbs.db
 config.yaml
 config-*.yaml
 vault_config.yaml
+
+# Multi-instance (v7.x): gerçek config/secrets/fleet dosyaları — örnekler (*.example.yaml) hariç
+config/*.yaml
+!config/*.example.yaml
+secrets/*
+!secrets/*.example.yaml
+fleet.yaml

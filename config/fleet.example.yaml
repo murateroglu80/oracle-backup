@@ -1,0 +1,20 @@
+# ============================================================
+# fleet.yaml — instance envanteri (spec §8.3). 'fleet.yaml' olarak kopyalayın.
+# Faz 1'de YALNIZCA --status modu tarafından okunur; backup akışını etkilemez, yoksa da
+# her şey çalışır (o durumda --status config/*.yaml dosyalarını tarar).
+# UI fazında orkestratör + FastAPI backend bu formatı tüketecek.
+# ============================================================
+
+FLEET:
+  - instance_id: "db-server1_orcl1"
+    config: "config/db-server1_orcl1.yaml"
+    enabled: true
+    description: "Üretim ORCL1 - MIP"
+  - instance_id: "db-server1_prod2"
+    config: "config/db-server1_prod2.yaml"
+    enabled: true
+    description: ""
+  - instance_id: "db-server2_hr"
+    config: "config/db-server2_hr.yaml"
+    enabled: false
+    description: "HR - şimdilik devre dışı"

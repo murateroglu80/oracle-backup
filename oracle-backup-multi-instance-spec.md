@@ -16,6 +16,15 @@
 >   yetmediği uyarısı.
 > - **§11.2:** `run_rman`'deki sabit 7200s timeout'un tespiti; `run_scp`/`run_rsync`'te backoff yokluğu.
 > - **§7:** Yeni kabul kriterleri 19-23.
+>
+> **Dizin isimlendirme (uygulama kararı, 2026-07-03):** Paket `modules/` (spec'in ilk taslağındaki
+> `rmanbackup/` DEĞİL), yaml yapılandırma dosyaları `config/` (ilk taslaktaki `conf.d/` DEĞİL),
+> credential dosyaları `secrets/` (chmod 700). Bu doküman bu isimlerle hizalanmıştır.
+>
+> **Uygulama durumu (2026-07-03):** Faz 1 (saf refactor) commit'lendi (`5a5f0e1`). Faz 2 (bu spec'in
+> fonksiyonel değişiklikleri) kodlandı ve offline doğrulandı; gerçek Oracle testi bekliyor.
+> Watchdog DB-progress'te yalnızca Kontrol 1 (`v$rman_status`) uygulandı — Kontrol 2-4 (§11.4.1)
+> ileride. Watchdog SSH yolu yalnızca lokal path üzerinden test edildi.
 
 ## Bağlam
 
@@ -45,7 +54,7 @@ Bu doküman, üzerinde anlaşılan çözümün tam implementasyon tanımıdır.
 | Provider kapsamı | **Global tek provider** — tüm instance'lar aynı backend'i kullanır (instance başına karışık provider YOK) |
 | Local provider dosya izni | İzin 600 değilse sadece WARNING logla, çalışmaya devam et (fail-fast YOK) |
 | Config anahtar adı | `CREDENTIALS_CONFIG` (yeni ad). `VAULT_CONFIG` geriye dönük uyumluluk için alias olarak kabul edilir |
-| Kod organizasyonu | Tek `backup.py` → `rmanbackup/` paketi; sorumluluk bazlı modüller, tek yönlü bağımlılık hiyerarşisi (Bölüm 9) |
+| Kod organizasyonu | Tek `backup.py` → `modules/` paketi; sorumluluk bazlı modüller, tek yönlü bağımlılık hiyerarşisi (Bölüm 9) |
 | Log/history formatı | Vektör DB'ye hazır: JSONL structured log + `run_id` + versiyonlu history şeması + no-op ingest kancası (Bölüm 10) |
 | Döngü güvenliği | `while True` yasak, kısa komutlara zorunlu timeout, backoff'lu sınırlı retry, RMAN'a otomatik retry YOK (Bölüm 11) |
 | Uzun iş koruması | Duvar-saati timeout DEĞİL, canlılık bazlı **watchdog**: çıktı akışı + DB progress sorgusu (default True, kapatılabilir) + OS PID kontrolü; `max_runtime` opt-in (Bölüm 11.4) |
@@ -659,7 +668,7 @@ için sorun değil, ama import satırına yorum olarak not düşülmeli.
    çalışmaya devam etmeli (alias dönüşümü doğrulaması).
 10. (İleriye dönük, implementasyon gerektirmez) `provider: "cyberark"` verildiğinde script net bir
     `NotImplementedError` ile durmalı — "sessizce vault'a düşme" gibi belirsiz bir davranış olmamalı.
-11. `--config db1.yaml` gibi çıplak dosya adı verildiğinde `conf.d/db1.yaml` bulunmalı; tam yol
+11. `--config db1.yaml` gibi çıplak dosya adı verildiğinde `config/db1.yaml` bulunmalı; tam yol
     verildiğinde eski davranış korunmalı.
 12. Aynı `TARGET_SERVER.host`'u hedefleyen iki instance eşzamanlı başlatıldığında ikincisi host
     kilidinde beklemeli; `host_lock_timeout_min` aşılırsa FAILED ile (history'ye kayıt düşerek)
@@ -707,6 +716,12 @@ için sorun değil, ama import satırına yorum olarak not düşülmeli.
 23. (Vault key ayrışma uyarısı — Bölüm 2.2.1) `vault.instance_id` set edilip `_resolved_instance_id`'den
     farklı olduğunda tutarlılık WARNING'i loglanmalı; boş bırakıldığında Vault lookup ve path
     namespacing aynı değeri kullanmalı.
+24. (Ortak config — `config/shared.yaml`) `shared.yaml`'da `MAIL_CONFIG` tanımlıyken, MAIL_CONFIG'i hiç
+    içermeyen bir instance config yüklendiğinde `config["MAIL_CONFIG"]` shared değerini almalı; instance
+    bir anahtarı (örn. notification_level) override ederse o anahtar instance'tan, diğerleri shared'dan
+    gelmeli; `to_addrs` gibi listeler wholesale değişmeli. `shared.yaml` yoksa davranış değişmemeli
+    (backward compat). shared.yaml'a whitelist dışı bir section (örn. ORACLE_CONFIG) konursa WARNING
+    loglanıp yok sayılmalı.
 
 ---
 
@@ -720,7 +735,7 @@ Tüm instance config'leri ve secrets dosyaları için sabit, öngörülebilir bi
 oracle-backup/
 ├── backup.py
 ├── run.sh
-├── conf.d/                        # TÜM instance config'leri burada
+├── config/                        # TÜM instance config'leri burada
 │   ├── db-server1_orcl1.yaml     # dosya adı = instance_id (kural, zorunlu değil ama önerilen)
 │   ├── db-server1_prod2.yaml
 │   └── db-server2_hr.yaml
@@ -733,21 +748,26 @@ oracle-backup/
 
 Davranış kuralları:
 - `--config` parametresi göreli bir yol/dosya adı ise arama sırası: (1) verilen yol olduğu gibi,
-  (2) `script_dir/conf.d/<ad>`, (3) `script_dir/<ad>`. Böylece `--config db-server1_orcl1.yaml`
+  (2) `script_dir/config/<ad>`, (3) `script_dir/<ad>`. Böylece `--config db-server1_orcl1.yaml`
   yazmak yeterli olur.
 - `CREDENTIALS_CONFIG.vault.vault_file` / `local.secrets_file` göreli verildiğinde varsayılan taban
   dizin `script_dir/secrets/` olur (mutlak yol verilirse olduğu gibi kullanılır).
 - Kurulum/ilk çalıştırmada `secrets/` dizini yoksa oluşturulur ve izni `700` yapılır; dizin izni
   `700`'den genişse WARNING loglanır (LocalSecretsProvider'ın dosya-izni kuralıyla tutarlı: uyar,
   durdurma).
-- `config.example.yaml` ve `vault_config.example.yaml` → `conf.d/example.yaml` ve
-  `secrets/vault.example.yaml` olarak taşınır; README'deki yollar güncellenir.
+- `config.example.yaml` → `config/config.example.yaml`, eski `vault_config.example.yaml` →
+  `secrets/vault.example.yaml` (yeni `VAULT_INSTANCES` formatında) olarak taşınır; ayrıca
+  `secrets/secrets_local.example.yaml` ve `config/fleet.example.yaml` eklenir. README yolları güncellenir.
 
-**Not (Madde 1 / config drift için kapı açık bırakma):** `load_config()` tek giriş noktası olarak
-korunur ve dosya okuma + alias dönüşümü + instance_id çözümleme adımları ayrık tutulur. İleride
-`conf.d/config.base.yaml` (ortak SMTP/RMAN_TEMPLATE/MONITORING alanları) desteği eklenmek istenirse,
-`load_config()` başına "base'i oku → instance config'i üzerine merge et" adımı 5-10 satırla girer;
-bu refactor'da merge implementasyonu YAPILMAZ, sadece yapı buna uygun tutulur.
+**Not (Madde 1 / config drift): UYGULANDI — `config/shared.yaml` (2026-07-03).** Org-geneli ortak
+section'lar (`MAIL_CONFIG` + `MONITORING_CONFIG`) tek bir `config/shared.yaml`'da bir kez tanımlanır;
+`load_config()` bunları her instance config'ine deep-merge eder (shared = taban, instance = override,
+instance kazanır; liste alanları wholesale replace). Whitelist `SHAREABLE_SECTIONS = ("MAIL_CONFIG",
+"MONITORING_CONFIG")` — dışındaki section'lar (ORACLE_CONFIG/TARGET_SERVER/BACKUP_CONFIG gibi
+instance'a özgü olanlar) shared.yaml'a konursa WARNING loglanıp yok sayılır. `shared.yaml` yoksa
+davranış eskisiyle birebir aynıdır (opsiyonel, geriye dönük uyumlu). İleride RMAN_TEMPLATE'i de ortak
+yapmak = whitelist tuple'ına bir satır. Kurumda tek e-posta/monitoring ayarını 5 DB'de tekrar yazma
+ve drift sorununu çözer.
 
 ### 8.2 Host bazlı lock (Faz 1 kapsamında)
 
@@ -785,11 +805,11 @@ sabitlenir. Orkestratör (fleet_runner) bu fazda YAZILMAZ.
 ```yaml
 FLEET:
   - instance_id: "db-server1_orcl1"
-    config: "conf.d/db-server1_orcl1.yaml"
+    config: "config/db-server1_orcl1.yaml"
     enabled: true
     description: "Üretim ORCL1 - MIP"
   - instance_id: "db-server1_prod2"
-    config: "conf.d/db-server1_prod2.yaml"
+    config: "config/db-server1_prod2.yaml"
     enabled: true
     description: ""
 ```
@@ -803,7 +823,7 @@ FLEET:
 
 Yeni CLI argümanı: `python3 backup.py --status`
 
-- `fleet.yaml` varsa oradaki tüm instance'ları, yoksa `conf.d/*.yaml` dosyalarını tarar.
+- `fleet.yaml` varsa oradaki tüm instance'ları, yoksa `config/*.yaml` dosyalarını tarar.
 - Her instance için ilgili `history_dir`'deki son kaydı okur ve tek bir özet tablo basar:
 
 ```
@@ -827,11 +847,11 @@ db-server2_hr          2026-07-02 02:00:09  FAILED    0         00:00:31  NO
 
 | Konu | Faz 1 (bu refactor) | UI Fazı (sonra) |
 |---|---|---|
-| Dizin yerleşimi (`conf.d/`, `secrets/`) | ✅ Uygulanır | — |
+| Dizin yerleşimi (`config/`, `secrets/`) | ✅ Uygulanır | — |
 | Host bazlı lock | ✅ Uygulanır | — |
 | `fleet.yaml` formatı | ✅ Tanımlanır (salt-okunur kullanım) | Orkestratör + UI bunu tüketir |
 | `--status` özet modu | ✅ Uygulanır | FastAPI endpoint'ine evrilir |
-| Config base+override merge | ❌ (sadece kapı açık bırakılır) | İhtiyaç doğarsa |
+| Config base+override merge | ✅ Uygulandı (`config/shared.yaml`; whitelist MAIL+MONITORING) | RMAN_TEMPLATE vb. genişletme |
 | fleet_runner / paralel tetikleme | ❌ | UI fazında job katmanıyla birlikte |
 
 ## 9. Modüler Paket Yapısı (tek backup.py'den paket mimarisine geçiş)
@@ -846,7 +866,7 @@ modüller etkilenmez.
 ```
 oracle-backup/
 ├── backup.py                  # SADECE giriş noktası: argparse + orchestration (~100-150 satır)
-├── rmanbackup/                # asıl paket
+├── modules/                # asıl paket
 │   ├── __init__.py            # __version__ burada
 │   ├── config.py              # load_config, resolve_instance_id, sanitize_instance_id, path çözümleme
 │   ├── connection.py          # get_ssh_client, run_command_wrapper, execute_oracle_sql
@@ -860,7 +880,7 @@ oracle-backup/
 │   ├── mailing.py             # send_daily_summary, test mail, HTML rapor üretimi
 │   ├── monitoring.py          # push_metrics (prometheus/zabbix)
 │   └── status.py              # collect_fleet_status, --status tablo çıktısı
-├── conf.d/ , secrets/ , fleet.yaml   # (Bölüm 8.1)
+├── config/ , secrets/ , fleet.yaml   # (Bölüm 8.1)
 └── tests/                     # her modül için birim test iskeleti
 ```
 
@@ -869,7 +889,7 @@ oracle-backup/
 - **Arayüz sabitliği:** Her modülün dışa açtığı fonksiyon/sınıf imzaları modülün başında
   `__all__` ile açıkça listelenir. `__all__` dışındaki her şey (alt fonksiyonlar, sabitler) modül-içi
   kabul edilir ve serbestçe değiştirilebilir.
-- **Bağımlılık yönü tek taraflı:** `backup.py` → `rmanbackup.*` yönünde; modüller birbirini ancak
+- **Bağımlılık yönü tek taraflı:** `backup.py` → `modules.*` yönünde; modüller birbirini ancak
   şu hiyerarşiyle çağırabilir: `config`/`logging_setup`/`connection` alt katman; `secrets`/`locking`/
   `history` orta katman; `rman`/`space`/`transfer`/`mailing`/`monitoring`/`status` üst katman. Üst
   katman modülleri **birbirini import edemez** (örn. `transfer.py`, `mailing.py`'yi çağıramaz —
