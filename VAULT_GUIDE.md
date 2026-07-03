@@ -163,10 +163,35 @@ CREDENTIALS_CONFIG:
   provider: "vault"
   vault:
     vault_file: "vault.yaml"     # Relative to script dir or absolute path
-    instance_id: ""               # Leave empty (uses resolved instance_id)
+    instance_id: ""               # Leave empty (recommended)
 ```
 
-**Instance lookup:** `backup.py --config config/db-server1_orcl1.yaml` will:
+**Why leave `instance_id` empty?** (spec §2.2.1)
+
+By default, `instance_id` is auto-derived from `TARGET_SERVER.host + ORACLE_SID`. The script uses this
+resolved `instance_id` to:
+- Look up credentials in `VAULT_INSTANCES.<resolved_id>` (this file)
+- Namespace log/history/pid files under `{log_dir}/{resolved_id}/` etc.
+
+If you set `vault.instance_id` to something different from the resolved ID, Vault lookup and path
+namespacing will **diverge** — you'll fetch credentials for instance "A" but write logs for instance "B",
+which is a configuration error. To prevent silent bugs, the script logs a **WARNING** when this happens.
+
+**Best practice:** Leave `vault.instance_id` empty. Instead, name your Vault entries to match the resolved
+instance_id:
+```yaml
+VAULT_INSTANCES:
+  db-server1_orcl1:      # Use <host>_<SID> naming
+    url: "..."
+    ...
+  db-server1_prod2:      # One entry per instance
+    url: "..."
+    ...
+```
+
+### Instance Lookup Flow
+
+`./run.sh --config config/db-server1_orcl1.yaml` will:
 1. Resolve `instance_id = "db-server1_orcl1"` (from ORACLE_SID + host, or explicit override)
 2. Look up `VAULT_INSTANCES.db-server1_orcl1` in `vault.yaml`
 3. Query `secret/oracle/db-server1_orcl1` for credentials
