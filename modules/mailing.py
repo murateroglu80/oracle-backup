@@ -205,10 +205,12 @@ def send_daily_summary(history_dir, mail_config, smtp_password, logger, target_d
         overall_status = "ERROR / FAILED"
         status_color = "#dc3545"  # Red
 
-    subject = f"{mail_config['subject_prefix']} [{final_severity_label}] Daily Summary | {target_date}"
-
     # Extract info safely
     oracle_sid = oracle_config.get("ORACLE_SID", "N/A") if oracle_config else "N/A"
+
+    # Subject: tarih yerine SID (mailin gövdesinde tarih zaten var).
+    sid_label = db_name or oracle_sid
+    subject = f"{mail_config['subject_prefix']} [{final_severity_label}] Daily Summary | {sid_label}"
 
     # Db host is either ORACLE_HOSTNAME or TARGET_SERVER host
     db_host = "Unknown"
