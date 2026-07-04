@@ -2,9 +2,9 @@
 
 All notable changes to the backup system are documented in this file.
 
-## [Unreleased - v7.0.0 Draft]
+## [7.0.0] - 2026-07-04
 
-### Major: Multi-Instance Refactor (Faz 1 & 2)
+### Major: Multi-Instance Refactor & Production-Ready Features (Faz 1 & 2 & 3)
 
 **Faz 1 (Saf Refactor, commit `5a5f0e1`):**
 - Split monolithic `backup.py` (1425 lines) into modular `modules/` package: config, connection, secrets, history, logging_setup, space, rman, transfer, mailing, monitoring, status, locking.
@@ -12,22 +12,32 @@ All notable changes to the backup system are documented in this file.
 - Config file discovery: relative/absolute → project root → `config/` directory.
 - Dependency injection to eliminate upper-layer cross-imports (spec §9.2).
 
-**Faz 2 (Functional, in progress):**
-- **Multi-Instance Architecture:** `instance_id` auto-derived from `host_SID` or explicit override; all paths auto-namespaced by instance (logs, history, PID, temp).
-- **Pluggable Credentials (spec §2):** `SecretsProvider` ABC with Vault, Local, Null, CyberArk-stub backends; instance-scoped lookups; fail-fast on missing instance (Local).
-- **Org-Wide Shared Config (spec §8.5):** `config/shared.yaml` for common MAIL_CONFIG + MONITORING_CONFIG (deep-merge per instance; instance overrides win; backward-compatible).
+**Faz 2 (Multi-Instance Core - Completed):**
+- **Multi-Instance Architecture:** `instance_id` SID-only (or host_SID override); all paths auto-namespaced by instance (logs, history, PID, temp).
+- **Pluggable Credentials (spec §2):** `SecretsProvider` ABC with Vault (AppRole), Local, Null backends; instance-scoped lookups.
+- **Org-Wide Shared Config (spec §8.5):** `config/shared.yaml` for common MAIL_CONFIG + MONITORING_CONFIG (deep-merge per instance; instance overrides win).
 - **Watchdog-Based Stall Detection (spec §11.4):** Replace hard timeouts with activity-based watchdog (Signals: output, DB v$rman_status, OS PID liveness).
 - **Structured Logging (spec §10):** Dual .log (human) + .jsonl (machine) with run_id, instance_id, phase tracking; on_record_written hook for ingest.
 - **Concurrent-Safe History (spec §5):** fcntl.flock + atomic write (os.replace); BackupRecord dataclass; schema_version=2; SKIPPED/FAILED history records.
 - **Host-Based Locking (spec §8.2):** `acquire_host_lock` via fcntl on temp_dir lockfile; serialize same-host backups.
 - **Fleet Status (spec §8.3-4):** `--status` mode reads fleet.yaml or config/*.yaml; markdown table; exit 0/1/2 codes.
-- **Credentials Config Backward-Compat (spec §2.8):** VAULT_CONFIG → CREDENTIALS_CONFIG alias; legacy vault_config.yaml auto-discovery.
-- **Backoff Retry on Transfer (spec §11.2):** Exponential backoff + log on rsync/scp failure.
-- **Watchdog DB Progress (§11.4):** v$rman_status mbytes_processed check (Kontrol 1; Kontrol 2-4 future).
 
-### Known Limitations (v7.0.0)
-- Watchdog SSH path untested (local path validated via offline smoke tests).
-- DB progress check via Kontrol 1 only; Kontrol 2-4 (session_longops, wait events, FRA) reserved for future.
+**Faz 3 (Multi-DB Mail & Lifecycle - Completed):**
+- **Database-Aware Mail (spec §10.5):** History.db_name field; daily mail filters by DB (multi-DB mail mixes are eliminated).
+- **Weekly Summary (spec §10.5):** Configurable day-of-week (weekly_summary_day); optional last-7-days table in daily mail.
+- **Backup Type Tracking (spec §10.2):** BackupRecord.rman_components records enabled components (full/archive/controlfile/spfile); JSON-only (not in mail).
+- **Mail Subject SID (UX):** Subject now shows database SID instead of date (date already in body); clearer multi-DB fleet at a glance.
+- **Log Cleanup (spec §9.3):** `--clear-logs` safely purges old backup logs without touching history; multi-instance safe.
+- **Vault Setup Documentation:** Step-by-step AppRole/SecretID flow with TTL options (never-expire for dev, 1-year for prod).
+
+### Testing & Production Validation
+- Tested on real MIPDB (RMAN backup + transfer + mail) with Vault integration.
+- db_name filtering, rman_components recording, weekly summary logic verified.
+- Sensitive data (hostnames, DB names) in docs anonymized for public consumption.
+
+### Known Limitations
+- Watchdog Kontrol 2-4 (session_longops, wait events, FRA) reserved for future.
+- CyberArk provider is stubbed (ready for implementation).
 - CyberArk provider is stub; requires actual implementation.
 - fleet_runner orchestrator not in scope (UI phase).
 
