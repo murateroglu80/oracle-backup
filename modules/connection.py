@@ -11,6 +11,7 @@
 import os
 import re
 import select
+import shlex
 import socket
 import subprocess
 import sys
@@ -43,12 +44,16 @@ def _build_full_cmd(cmd, env_dict):
 def execute_oracle_sql(ssh_client, conn_str, sql_content, logger, env_dict, temp_dir="/tmp", timeout=DEFAULT_CMD_TIMEOUT, quiet=True):
     """SQL script'ini sqlplus'a geçici dosya (Heredoc) üzerinden güvenli çalıştırır.
 
-    temp_dir (spec §4): geçici .sql dosyasının yeri — instance başına ayrılmaz, global tek path."""
+    temp_dir (spec §4): geçici .sql dosyasının yeri — instance başına ayrılmaz, global tek path.
+
+    conn_str shlex.quote ile shell'e güvenli geçirilir: DB şifresi tek tırnak/boşluk gibi
+    shell-özel karakter içerse bile komut satırı bozulmaz. Katmanlama: shell quoting dışta
+    (shlex), sqlplus quoting içte (_db_conn_str şifreyi "..." ile sarar)."""
     cmd = f"""SQL_TMP=$(mktemp {temp_dir}/oracle_query_XXXXXX.sql)
 cat << 'EOF' > "$SQL_TMP"
 {sql_content}
 EOF
-sqlplus -s '{conn_str}' @"$SQL_TMP"
+sqlplus -s {shlex.quote(conn_str)} @"$SQL_TMP"
 rm -f "$SQL_TMP"
 """
     return run_command_wrapper(ssh_client, cmd, logger, env_dict=env_dict, timeout=timeout, quiet=quiet)

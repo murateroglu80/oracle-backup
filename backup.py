@@ -162,8 +162,16 @@ def main(config_file="config.yaml", dry_run=False, test_mail=False, test_transfe
             sql = "SET HEADING OFF FEEDBACK OFF PAGESIZE 0\nSELECT sys_context('userenv','db_name') FROM dual;\nEXIT;\n"
             logger.info("Running test query on Database using secrets-provider credentials...")
             status, out, err = execute_oracle_sql(ssh_client_test, conn_str, sql, logger, env_dict=env, temp_dir=temp_dir, quiet=True)
-            if status == 0:
-                logger.info(f"DB Test Successful! Connected to database: {out.strip()}")
+            db_name = out.strip()
+            # status==0 tek başına yeterli DEĞİL: sqlplus bozuk connect string'de usage/help basıp
+            # exit 0 dönebilir. Çıktının gerçekten bir db_name olduğunu doğrula (aksi halde
+            # bağlanmadığı halde 'Successful' raporlanır — false positive).
+            bad_markers = ("SQL*Plus", "Usage:", "ERROR", "ORA-", "TNS-", "SP2-")
+            looks_valid = bool(db_name) and not any(m in db_name for m in bad_markers)
+            if status == 0 and looks_valid:
+                # db_name genelde tek satır; ilk anlamlı satırı al.
+                first_line = next((ln.strip() for ln in db_name.splitlines() if ln.strip()), db_name)
+                logger.info(f"DB Test Successful! Connected to database: {first_line}")
             else:
                 logger.error(f"DB Test Failed! Exit code {status}.\nOutput: {out}\nError: {err}")
             if ssh_client_test:
