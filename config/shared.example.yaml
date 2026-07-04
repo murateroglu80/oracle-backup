@@ -26,6 +26,8 @@ MAIL_CONFIG:
     - "dba-team@example.com"
   subject_prefix: "[RMAN BACKUP]"
   daily_mail_hour: 23              # Bu saatte özet mail; "all" = her run'dan sonra
+  weekly_summary_day: 0           # Haftalık "Geçen Hafta Özeti" günü: 0=Pzt..6=Paz; -1=kapalı.
+                                  # O gün günlük mailin altına son 7 günün kayıt tablosu eklenir.
   # smtp_password: ""              # Tercihen Vault/Local secrets'tan gelir (get_smtp_password)
 
 MONITORING_CONFIG:

@@ -51,6 +51,11 @@ class BackupRecord:
     run_id: str = ""
     schema_version: int = HISTORY_SCHEMA_VERSION
     errors_warnings: str = "None"
+    # DB ayrımı: mail bu alanla filtreler (aynı history_dir paylaşılsa bile DB'ler karışmaz).
+    db_name: str = ""
+    # RMAN'de açık olan bileşenler ("full,archive,controlfile,spfile") — yalnızca JSON/analiz
+    # için tutulur, mailde GÖSTERİLMEZ. Transfer/SKIPPED kayıtlarında boş kalır.
+    rman_components: str = ""
     is_deleted: bool = False
     deleted_at: str = None
     # Transfer'a özgü opsiyonel alanlar (backup kayıtlarında None/False kalır)

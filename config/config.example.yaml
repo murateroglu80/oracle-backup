@@ -108,6 +108,7 @@ MAIL_CONFIG:
     - "dba-team@example.com"
   subject_prefix: "[RMAN BACKUP]"
   daily_mail_hour: 23              # Bu saatte mail; "all" = her run'dan sonra
+  weekly_summary_day: 0           # Haftalık özet günü: 0=Pzt..6=Paz; -1=kapalı (günlük mailin altına son 7 gün)
   smtp_password: ""                # provider "none"/local iken buradan da okunabilir
 
 MONITORING_CONFIG:

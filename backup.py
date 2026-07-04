@@ -156,6 +156,7 @@ def main(config_file="config.yaml", dry_run=False, test_mail=False, test_transfe
 
     # instance_id + resolved path'ler tek kaynaktan (spec §1, §3, §3.1)
     instance_id = config["_resolved_instance_id"]
+    oracle_sid = ORACLE_CONFIG.get("ORACLE_SID", "")  # history db_name + mail filtre anahtarı
     paths = config["_resolved_paths"]
     log_dir, history_dir, pid_file, temp_dir = paths["log_dir"], paths["history_dir"], paths["pid_file"], paths["temp_dir"]
 
@@ -283,7 +284,7 @@ def main(config_file="config.yaml", dry_run=False, test_mail=False, test_transfe
         append_history(history_dir, BackupRecord(
             run_time=skip_ts, start_time=skip_ts, end_time=skip_ts, operation="Backup",
             directory="-", duration="0m 00s", size_gb="0", status="SKIPPED", severity="WARNING",
-            run_id=run_id, errors_warnings=f"Lock held by PID {pid}; run skipped.",
+            run_id=run_id, db_name=oracle_sid, errors_warnings=f"Lock held by PID {pid}; run skipped.",
         ))
         sys.exit(2)
 
@@ -297,7 +298,6 @@ def main(config_file="config.yaml", dry_run=False, test_mail=False, test_transfe
             logger.info("TARGET_SERVER is disabled. Running all commands LOCALLY.")
 
         env = _backup_env(ORACLE_CONFIG, temp_dir)
-        oracle_sid = ORACLE_CONFIG.get("ORACLE_SID", "")
 
         # --- Host bazlı lock (spec §8.2): aynı host'a yedekleri serileştir ---
         watchdog_cfg = BACKUP_CONFIG.get("watchdog", {})
@@ -310,7 +310,7 @@ def main(config_file="config.yaml", dry_run=False, test_mail=False, test_transfe
                 append_history(history_dir, BackupRecord(
                     run_time=fail_ts, start_time=fail_ts, end_time=fail_ts, operation="Backup",
                     directory="-", duration="0m 00s", size_gb="0", status="FAILED", severity="ERROR",
-                    run_id=run_id, errors_warnings=f"Host lock timeout for '{host_key}'.",
+                    run_id=run_id, db_name=oracle_sid, errors_warnings=f"Host lock timeout for '{host_key}'.",
                 ))
                 sys.exit(1)
 
@@ -331,6 +331,8 @@ def main(config_file="config.yaml", dry_run=False, test_mail=False, test_transfe
         error_msg = None
         backup_start = datetime.now()
         overall_start = time.time()
+        rman_components = ""  # history'e yazılacak açık RMAN bileşenleri (mailde gösterilmez);
+                              # RMAN üretim dalında doldurulur, blok atlanırsa boş kalır (garanti tanım).
         free_gb, required_gb = 0, 0
 
         try:
@@ -358,11 +360,13 @@ def main(config_file="config.yaml", dry_run=False, test_mail=False, test_transfe
                     logger.info(f"Using custom RMAN script from: {rman_script_file}")
                     with open(rman_script_file, "r") as f:
                         rman_script = f.read()
+                    rman_components = "custom"
                 else:
                     logger.warning(f"Custom RMAN script file '{rman_script_file}' not found. Falling back to RMAN_TEMPLATE.")
 
             if not rman_script:
                 if test_transfer:
+                    rman_components = "controlfile"
                     rman_script = f"""
 RUN {{
   ALLOCATE CHANNEL c1 TYPE {device_type};
@@ -382,6 +386,16 @@ QUIT;
                         if isinstance(val, str):
                             return val.lower() in ('true', 'yes', '1', 'on')
                         return bool(val)
+
+                    # Açık RMAN bileşenlerini history için topla (mailde gösterilmez).
+                    rman_components = ",".join(
+                        name for name, key in (
+                            ("full", "full_backup"),
+                            ("archive", "archive_backup"),
+                            ("controlfile", "controlfile_backup"),
+                            ("spfile", "spfile_backup"),
+                        ) if is_true(RMAN_TEMPLATE.get(key, True))
+                    )
 
                     archivelog_deletion_cmd = f"DELETE NOPROMPT ARCHIVELOG ALL COMPLETED BEFORE 'SYSDATE-{ret_days}' BACKED UP 1 TIMES TO DISK;"
                     if has_standby:
@@ -493,6 +507,8 @@ QUIT;
             status=success_status,
             severity="INFO" if not error_msg else "ERROR",
             run_id=run_id,
+            db_name=oracle_sid,
+            rman_components=rman_components,
             errors_warnings=error_msg or "None",
         )
 
@@ -580,6 +596,7 @@ QUIT;
                     status="SUCCESS",
                     severity="INFO",
                     run_id=run_id,
+                    db_name=oracle_sid,
                     remote_path_only=remote_path_only,
                     transfer_speed_mbps=round(avg_speed, 2),
                     total_attempts=attempts,
@@ -602,6 +619,7 @@ QUIT;
                     status="FAILED",
                     severity="ERROR",
                     run_id=run_id,
+                    db_name=oracle_sid,
                     errors_warnings=str(e),
                     remote_backup=True,
                     remote_complete=False,
@@ -703,7 +721,7 @@ EXIT;"""
             if MAIL_CONFIG.get("use_auth", True):
                 smtp_password = secrets_provider.get_smtp_password(instance_id) or MAIL_CONFIG.get("smtp_password")
             report_date = backup_start.strftime("%Y-%m-%d")
-            send_daily_summary(history_dir, MAIL_CONFIG, smtp_password, logger, target_date=report_date, target_server=TARGET_SERVER, oracle_config=ORACLE_CONFIG, backup_config=BACKUP_CONFIG, rman_report_html=rman_report_html)
+            send_daily_summary(history_dir, MAIL_CONFIG, smtp_password, logger, target_date=report_date, target_server=TARGET_SERVER, oracle_config=ORACLE_CONFIG, backup_config=BACKUP_CONFIG, rman_report_html=rman_report_html, db_name=oracle_sid)
 
         if error_msg:
             sys.exit(1)
