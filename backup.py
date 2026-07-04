@@ -46,7 +46,7 @@ from modules.utils import format_duration
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
-def _backup_env(oracle_config, temp_dir):
+def _backup_env(oracle_config, temp_dir=None):
     env = {}
     for key, val in oracle_config.items():
         env[key] = str(val)
@@ -54,8 +54,9 @@ def _backup_env(oracle_config, temp_dir):
     env["PATH"] = f"/usr/sbin:{oh}/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
     env["LD_LIBRARY_PATH"] = f"{oh}/lib:/lib:/usr/lib"
     env["CLASSPATH"] = f"{oh}/JRE:{oh}/jlib:{oh}/rdbms/jlib"
-    env["TMP"] = temp_dir
-    env["TMPDIR"] = temp_dir
+    # TMP/TMPDIR ARTIK override EDİLMEZ: target sunucu kendi OS temp'ini (TMPDIR ya da /tmp)
+    # kullanır. Aksi halde jump'taki config temp_dir'i target'a taşınır ve orada olmayan bir
+    # path'e mktemp yapılmaya çalışılırdı. (temp_dir parametresi çağrı uyumu için korunur.)
     return env
 
 
@@ -75,6 +76,70 @@ def run_status_mode(stale_hours=STATUS_STALE_HOURS_DEFAULT):
         return 1
     if any(r["stale"] for r in rows):
         return 2
+    return 0
+
+
+def run_clear_logs(config_file, assume_yes=False):
+    """--clear-logs: YALNIZCA ilgili instance'ın log_dir'indeki log dosyalarını siler.
+
+    GÜVENLİK: history_dir, pid_file, yedek (backup) dosyalarına ve alt dizinlere DOKUNMAZ.
+    Sadece log_dir'in DOĞRUDAN içindeki `backup_*.log` / `backup_*.jsonl` dosyaları (ve
+    backup_latest.log symlink'i) hedeflenir. Silmeden önce listeler ve onay ister
+    (--yes ile onaysız). Log dizini yoksa / boşsa hiçbir şey yapmaz.
+    """
+    import glob
+
+    config = load_config(config_file)
+    log_dir = os.path.abspath(config["_resolved_paths"]["log_dir"])
+    history_dir = os.path.abspath(config["_resolved_paths"]["history_dir"])
+
+    # Ekstra güvenlik: log_dir ile history_dir yanlışlıkla aynıysa DUR (history'yi silme riski).
+    if log_dir == history_dir:
+        print(f"[CLEAR-LOGS] GÜVENLİK: log_dir ile history_dir aynı ({log_dir}). "
+              f"History kaybı riski nedeniyle iptal edildi.")
+        return 1
+
+    if not os.path.isdir(log_dir):
+        print(f"[CLEAR-LOGS] Log dizini yok, yapılacak bir şey yok: {log_dir}")
+        return 0
+
+    targets = []
+    for pat in ("backup_*.log", "backup_*.jsonl"):
+        for p in glob.glob(os.path.join(log_dir, pat)):
+            # Sadece log_dir'in doğrudan çocukları (alt dizine inme, path traversal engeli).
+            if os.path.dirname(os.path.abspath(p)) != log_dir:
+                continue
+            if os.path.isfile(p) or os.path.islink(p):
+                targets.append(p)
+    targets = sorted(set(targets))
+
+    if not targets:
+        print(f"[CLEAR-LOGS] Silinecek log dosyası yok: {log_dir}")
+        return 0
+
+    print(f"[CLEAR-LOGS] Log dizini : {log_dir}")
+    print(f"[CLEAR-LOGS] Silinecek {len(targets)} dosya (history/backup KORUNUR):")
+    for t in targets:
+        print(f"    - {os.path.basename(t)}")
+
+    if not assume_yes:
+        try:
+            resp = input("[CLEAR-LOGS] Onaylıyor musunuz? (yes/no): ").strip().lower()
+        except EOFError:
+            resp = ""
+        if resp not in ("yes", "y", "evet", "e"):
+            print("[CLEAR-LOGS] İptal edildi — hiçbir şey silinmedi.")
+            return 1
+
+    deleted = 0
+    for t in targets:
+        try:
+            os.remove(t)
+            deleted += 1
+        except Exception as e:
+            print(f"[CLEAR-LOGS] Silinemedi: {os.path.basename(t)} ({e})")
+
+    print(f"[CLEAR-LOGS] {deleted}/{len(targets)} log dosyası silindi. History ve yedekler korundu.")
     return 0
 
 
@@ -658,9 +723,14 @@ if __name__ == "__main__":
     parser.add_argument("--test-db", action="store_true", help="Run a test query against the database using secrets-provider credentials and exit.")
     parser.add_argument("--test-query", type=str, help="Run a custom SQL query against the database and exit (e.g. --test-query \"SELECT * FROM v$database;\")")
     parser.add_argument("--status", action="store_true", help="Print a read-only fleet status summary of all instances and exit.")
+    parser.add_argument("--clear-logs", action="store_true", help="Delete ONLY log files (backup_*.log/.jsonl) in this instance's log_dir and exit. History and backups are NOT touched. Uses --config to resolve the log_dir.")
+    parser.add_argument("--yes", action="store_true", help="Skip the confirmation prompt (use with --clear-logs for automation).")
     args = parser.parse_args()
 
     if args.status:
         sys.exit(run_status_mode())
+
+    if args.clear_logs:
+        sys.exit(run_clear_logs(args.config, assume_yes=args.yes))
 
     main(config_file=args.config, dry_run=args.dry_run, test_mail=args.test_mail, test_transfer=args.test_transfer, test_db=args.test_db, test_query=args.test_query)

@@ -41,15 +41,18 @@ def _build_full_cmd(cmd, env_dict):
     return env_prefix + cmd
 
 
-def execute_oracle_sql(ssh_client, conn_str, sql_content, logger, env_dict, temp_dir="/tmp", timeout=DEFAULT_CMD_TIMEOUT, quiet=True):
+def execute_oracle_sql(ssh_client, conn_str, sql_content, logger, env_dict, temp_dir=None, timeout=DEFAULT_CMD_TIMEOUT, quiet=True):
     """SQL script'ini sqlplus'a geçici dosya (Heredoc) üzerinden güvenli çalıştırır.
 
-    temp_dir (spec §4): geçici .sql dosyasının yeri — instance başına ayrılmaz, global tek path.
+    Geçici .sql dosyası TARGET sunucunun kendi OS temp'inde (mktemp default: $TMPDIR ya da /tmp)
+    oluşturulur — jump'taki config temp_dir'ine bağlanmaz. Dosya yaklaşımı SQL injection'a karşı
+    korumayı sürdürür (SQL heredoc ile literal yazılır, komut satırında yorumlanmaz).
+    (temp_dir parametresi geriye dönük çağrı uyumu için korunur; artık kullanılmıyor.)
 
     conn_str shlex.quote ile shell'e güvenli geçirilir: DB şifresi tek tırnak/boşluk gibi
     shell-özel karakter içerse bile komut satırı bozulmaz. Katmanlama: shell quoting dışta
     (shlex), sqlplus quoting içte (_db_conn_str şifreyi "..." ile sarar)."""
-    cmd = f"""SQL_TMP=$(mktemp {temp_dir}/oracle_query_XXXXXX.sql)
+    cmd = f"""SQL_TMP=$(mktemp -t oracle_query_XXXXXX.sql)
 cat << 'EOF' > "$SQL_TMP"
 {sql_content}
 EOF

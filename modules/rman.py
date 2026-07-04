@@ -84,8 +84,9 @@ def run_rman(logger, env, ssh_client, rman_script, label="rman", db_creds=None,
     logger.info(f"Executing RMAN Script ({label}):\n{rman_script}")
 
     # Fail-Fast wrapper: Preserve RC. Heredoc 'EOF' (single-quoted) -> shell değişken genişletmesi YOK.
-    # Geçici .rman dosyası temp_dir'de (spec §4).
-    cmd = f"""RMAN_TMP=$(mktemp {temp_dir}/rman_script_XXXXXX.rman)
+    # Geçici .rman dosyası TARGET'ın kendi OS temp'inde (mktemp -t: $TMPDIR ya da /tmp) oluşur —
+    # jump'taki config temp_dir'ine bağlanmaz. Dosya yaklaşımı korunur (SQL injection koruması).
+    cmd = f"""RMAN_TMP=$(mktemp -t rman_script_XXXXXX.rman)
 cat << 'EOF' > $RMAN_TMP
 {rman_script}
 EOF

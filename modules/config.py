@@ -32,15 +32,17 @@ def resolve_instance_id(config):
     """
     Öncelik sırası:
     1. Top-level config["INSTANCE_ID"] (elle override, boş değilse)
-    2. Otomatik: f"{TARGET_SERVER.host}_{ORACLE_CONFIG.ORACLE_SID}"
+    2. Otomatik: ORACLE_CONFIG.ORACLE_SID (yalın SID)
+
+    NOT: Otomatik türetme yalnızca SID kullanır (kısa, okunur). Aynı SID birden fazla
+    sunucuda varsa çakışmayı önlemek için ilgili config'lerde INSTANCE_ID elle set edilmeli.
     """
     override = config.get("INSTANCE_ID", "")
     if override:
         return sanitize_instance_id(override)
 
-    host = config.get("TARGET_SERVER", {}).get("host", "local")
     sid = config.get("ORACLE_CONFIG", {}).get("ORACLE_SID", "unknown")
-    return sanitize_instance_id(f"{host}_{sid}")
+    return sanitize_instance_id(sid)
 
 
 def _resolve_paths(config, instance_id):

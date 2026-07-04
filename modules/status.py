@@ -37,11 +37,16 @@ def _load_fleet(config_dir, script_dir):
 
 
 def _discover_configs(config_dir):
-    """fleet.yaml yoksa config/*.yaml taranır (example/vault/secrets/fleet hariç)."""
+    """fleet.yaml yoksa config/*.yaml taranır (example/vault/secrets/fleet/shared hariç).
+
+    shared.yaml org-geneli MAIL/MONITORING içerir (bir instance DEĞİL); taranırsa host/SID
+    bulunmadığı için sahte bir 'unknown' satırı üretirdi — o yüzden dışlanır.
+    """
     out = []
     for f in sorted(glob.glob(os.path.join(config_dir, "*.yaml"))):
         base = os.path.basename(f)
-        if base.endswith(".example.yaml") or base.startswith("vault") or base.startswith("secrets") or base == "fleet.yaml":
+        if (base.endswith(".example.yaml") or base.startswith("vault") or base.startswith("secrets")
+                or base == "fleet.yaml" or base == "shared.yaml"):
             continue
         out.append(f)
     return out
@@ -130,11 +135,14 @@ def collect_fleet_status(script_dir, stale_hours=STATUS_STALE_HOURS_DEFAULT):
 
 
 def format_status_table(rows):
-    header = f"{'INSTANCE':<24}{'LAST RUN':<21}{'STATUS':<10}{'SIZE(GB)':<10}{'DURATION':<12}{'TRANSFERRED'}"
+    # INSTANCE kolonu dinamik genişlik: en uzun instance_id'ye (veya başlığa) göre hizala,
+    # böylece uzun isimler taşıp diğer kolonlarla üst üste binmez.
+    iw = max([len("INSTANCE")] + [len(r["instance_id"]) for r in rows]) + 2
+    header = f"{'INSTANCE':<{iw}}{'LAST RUN':<21}{'STATUS':<10}{'SIZE(GB)':<10}{'DURATION':<12}{'TRANSFERRED'}"
     lines = [header, "-" * len(header)]
     for r in rows:
         lines.append(
-            f"{r['instance_id']:<24}{r['last_run']:<21}{r['status']:<10}"
+            f"{r['instance_id']:<{iw}}{r['last_run']:<21}{r['status']:<10}"
             f"{str(r['size_gb']):<10}{str(r['duration']):<12}{r['transferred']}"
         )
     if not rows:
