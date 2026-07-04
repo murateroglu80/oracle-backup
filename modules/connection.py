@@ -52,11 +52,14 @@ def execute_oracle_sql(ssh_client, conn_str, sql_content, logger, env_dict, temp
     conn_str shlex.quote ile shell'e güvenli geçirilir: DB şifresi tek tırnak/boşluk gibi
     shell-özel karakter içerse bile komut satırı bozulmaz. Katmanlama: shell quoting dışta
     (shlex), sqlplus quoting içte (_db_conn_str şifreyi "..." ile sarar)."""
+    # < /dev/null: bağlantı başarısız olursa sqlplus stdin'de prompt bekleyip ASILMASIN
+    # (SSH exec_command stdin'i açık tutar; connect hatası prompt'a düşerse süreç kilitlenir).
+    # Böyle bir durumda sqlplus hemen EOF alıp hata ile çıkar.
     cmd = f"""SQL_TMP=$(mktemp -t oracle_query_XXXXXX.sql)
 cat << 'EOF' > "$SQL_TMP"
 {sql_content}
 EOF
-sqlplus -s {shlex.quote(conn_str)} @"$SQL_TMP"
+sqlplus -s {shlex.quote(conn_str)} @"$SQL_TMP" < /dev/null
 rm -f "$SQL_TMP"
 """
     return run_command_wrapper(ssh_client, cmd, logger, env_dict=env_dict, timeout=timeout, quiet=quiet)

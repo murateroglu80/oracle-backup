@@ -64,7 +64,9 @@ def _db_conn_str(db_creds, sysdba=True):
     user = db_creds["username"]
     pwd = db_creds["password"]
     host = db_creds.get("hostname") or db_creds.get("ip")
-    db = db_creds.get("db", "")
+    # DB/service adı: Vault secret'ında field adı kuruma göre değişebilir
+    # (db / name / db_name hepsi kabul edilir — hangisi doluysa o kullanılır).
+    db = db_creds.get("db") or db_creds.get("name") or db_creds.get("db_name") or ""
     return f'{user}/"{pwd}"@{host}/{db}{" as sysdba" if sysdba else ""}'
 
 
