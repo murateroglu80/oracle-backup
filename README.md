@@ -6,6 +6,9 @@ Advanced RMAN backup automation for Oracle databases with **multi-instance/multi
 - **Multi-Instance/Multi-Database:** Manage multiple Oracle instances (different SIDs, different servers) from a single codebase.
 - **Centralized Management (Jump Server):** Logs, historical data, and configurations are kept on a single secure server.
 - **Org-Wide Shared Config:** Common SMTP/monitoring settings in single `config/shared.yaml` (no per-database repetition).
+- **Database-Aware Mail:** History tracks `db_name` (ORACLE_SID); daily mail filters by database — multi-DB environments don't mix in one mail.
+- **Weekly Summary:** Configurable weekly summary section (last 7 days) in daily mail on designated day-of-week.
+- **Backup Type Tracking:** Records which RMAN components (full/archive/controlfile/spfile) were enabled per backup for audit/analytics.
 - Backup history tracking (JSONL structured logging + JSON file history) and smart disk space management.
 - **HashiCorp Vault, Local, or standalone mode** for DB & SMTP credentials (pluggable `SecretsProvider`).
 - **Watchdog-based stall detection:** Monitors RMAN/transfer progress with automatic stall timeout (instead of hard timeouts).
@@ -13,6 +16,7 @@ Advanced RMAN backup automation for Oracle databases with **multi-instance/multi
 - Automatic RMAN SQL reporting embedded in post-backup email summaries.
 - Copy backups to another remote server via SCP/Rsync.
 - `--status` fleet overview (instance status table).
+- `--clear-logs` safely purge old backup logs without touching history.
 
 ## Requirements
 
@@ -88,6 +92,9 @@ All real configs (`.yaml`, not `.example.yaml`) are in `.gitignore` — safe to 
   - `transfer_hours`: Transfer hour(s), or `"all"` for transferring on every run.
   - `watchdog`: Stall detection for long-running RMAN/transfer; see spec §11.4 for details.
 - **MAIL_CONFIG**: Email settings.
+  - `daily_mail_hour`: Hour to send summary (23 = 11 PM), or `"all"` for every run.
+  - `weekly_summary_day`: Day-of-week (0=Monday–6=Sunday) to include 7-day history in daily mail (e.g., 0=Monday morning shows last week). Use -1 to disable.
+  - `subject_prefix`: Prepended to mail subject; actual subject format: `[prefix] [severity] Daily Summary | SID` (e.g., `[HUARIS-BACKUP] [INFO] Daily Summary | MIPDB`).
 
 ### Sensitive Settings (`vault_config.yaml`)
 - The Vault server address, token, and the Vault paths for DB and SMTP passwords (`db_secret_path` and `secret_path`) are defined here. This allows the script to securely fetch credentials instead of using OS authentication.
@@ -152,6 +159,10 @@ To manage the process much easier and avoid creating/activating a virtual enviro
 
 # If you want to use a different configuration file:
 ./run.sh --config config-db2.yaml
+
+# Clean up old backup logs (keeps history):
+./run.sh --config config-db2.yaml --clear-logs     # interactive confirmation
+./run.sh --config config-db2.yaml --clear-logs --yes   # skip confirmation
 
 # Normal execution (For automation):
 ./run.sh

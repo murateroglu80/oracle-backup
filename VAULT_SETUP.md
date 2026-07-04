@@ -160,9 +160,9 @@ token_ttl               10m
 SecretID'nin hâlâ geçerli olduğunu kontrol et (henüz silme):
 
 ```bash
-vault kv get secret/oracle/mipdb1022p_MIPDB
+vault kv get secret/oracle/mydb1_MYDB
 # ya da
-vault kv get database/mipdb1022p
+vault kv get database/mydb1
 ```
 
 ---
@@ -190,24 +190,24 @@ Adım 7'deki token'ı kullanarak `secrets/vault.yaml`'ı düzenle:
 
 ```yaml
 VAULT_INSTANCES:
-  mipdb1022p_MIPDB:
+  mydb1_MYDB:
     vault_file: "vault.yaml"
-    url: "http://vault.mersinport.com.tr:8200"
+    url: "http://vault.example.com:8200"
     token: "hvs.CAESIg5VvbjvZgQQG..."
-    secret_path: "database/mipdb1022p"          # Legacy path
-    db_secret_path: "database/mipdb1022p"      # Legacy path
+    secret_path: "database/mydb1"               # Legacy path
+    db_secret_path: "database/mydb1"            # Legacy path
 ```
 
 Veya yeni path convention'u kullanıyorsan:
 
 ```yaml
 VAULT_INSTANCES:
-  mipdb1022p_MIPDB:
+  mydb1_MYDB:
     vault_file: "vault.yaml"
-    url: "http://vault.mersinport.com.tr:8200"
+    url: "http://vault.example.com:8200"
     token: "hvs.CAESIg5VvbjvZgQQG..."
-    secret_path: "secret/oracle/mipdb1022p_MIPDB"
-    db_secret_path: "secret/oracle/mipdb1022p_MIPDB"
+    secret_path: "secret/oracle/mydb1_MYDB"
+    db_secret_path: "secret/oracle/mydb1_MYDB"
 ```
 
 ---
@@ -218,13 +218,13 @@ VAULT_INSTANCES:
 cd /path/to/oracle-backup
 
 # Test 1: Vault bağlantısı
-./run.sh --config config/mipdb1022p_MIPDB.yaml --test-db
+./run.sh --config config/mydb1_MYDB.yaml --test-db
 
 # Test 2: E-mail (relay, şifre gerekmez)
-./run.sh --config config/mipdb1022p_MIPDB.yaml --test-mail
+./run.sh --config config/mydb1_MYDB.yaml --test-mail
 
 # Test 3: Dry-run backup
-./run.sh --config config/mipdb1022p_MIPDB.yaml --dry-run
+./run.sh --config config/mydb1_MYDB.yaml --dry-run
 ```
 
 ---

@@ -6,6 +6,9 @@ Bu Python betiği, Oracle veritabanları için gelişmiş RMAN yedekleme otomasy
 - **Çok-Instance/Çok-Veritabanı:** Farklı Oracle örnekleri (değişik SID'ler, değişik sunucular) tek bir codebase'den yönetin.
 - **Merkezi Yönetim (Jump Server):** Loglar, geçmiş verileri ve yapılandırmalar tek bir güvenli sunucuda tutulur.
 - **Org-Geneli Paylaşılmış Yapılandırma:** SMTP/monitoring ayarlarını tek `config/shared.yaml` dosyasında tanımlayın (her veritabanında tekrar yazmayın).
+- **Veritabanı-Bilgisi Mail:** Geçmiş, `db_name` (ORACLE_SID) başlı tutulur; günlük mail veritabanına göre filtreler — çok-DB ortamlarında maillar karışmaz.
+- **Haftalık Özet:** Haftanın belirli bir gününü seçerek günlük mail'in içine son 7 günün özet tablosu eklenir.
+- **Yedek Türü Kaydı:** Hangi RMAN bileşenleri (full/archive/controlfile/spfile) açık olduğu kaydedilir (denetim/analiz için).
 - Yedekleme geçmişi (JSONL yapılandırılmış logging) ve akıllı disk alanı yönetimi.
 - **HashiCorp Vault, Lokal, veya Bağımsız mod:** Pluggable `SecretsProvider` ile DB & SMTP kimlik bilgileri (instance başına seçim).
 - **Watchdog Tabanlı Stall Tespiti:** RMAN/transfer ilerleme monitörleme, sabit zaman-aşımları yerine canlılık sinyalleri.
@@ -13,6 +16,7 @@ Bu Python betiği, Oracle veritabanları için gelişmiş RMAN yedekleme otomasy
 - Yedekleme sonrası e-posta özetlerine otomatik RMAN SQL raporu ekleme.
 - SCP/Rsync aracılığıyla uzak sunucuya yedek kopyalama.
 - `--status` ile fleet genel görünümü (instance durum tablosu).
+- `--clear-logs` eski yedekleme loglarını güvenle temizleme (geçmiş bozulmaz).
 
 ## Gereksinimler
 
@@ -183,6 +187,10 @@ Süreci çok daha kolay yönetmek ve her seferinde sanal ortam (`venv`) oluştur
 
 # Farklı bir konfigürasyon dosyası ile çalıştırmak isterseniz:
 ./run.sh --config config-db2.yaml
+
+# Eski yedekleme loglarını temizlemek (geçmiş bozulmaz):
+./run.sh --config config-db2.yaml --clear-logs     # etkileşimli onay
+./run.sh --config config-db2.yaml --clear-logs --yes   # onay atlayın
 
 # Normal çalışma (Otomasyon için):
 ./run.sh
