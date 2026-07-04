@@ -64,3 +64,4 @@ config/*.yaml
 secrets/*
 !secrets/*.example.yaml
 fleet.yaml
+oracle-backup-multi-instance-spec.md
