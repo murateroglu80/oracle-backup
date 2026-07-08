@@ -90,7 +90,11 @@ All real configs (`.yaml`, not `.example.yaml`) are in `.gitignore` — safe to 
   - `remote_dest`: The final remote server where backups will be copied.
   - `transfer_method`: `scp` for Windows targets, `rsync` for Linux.
   - `transfer_hours`: Transfer hour(s), or `"all"` for transferring on every run.
-  - `watchdog`: Stall detection for long-running RMAN/transfer; see spec §11.4 for details.
+  - `watchdog`: Stall detection for long-running RMAN/transfer; see spec §11.4 for details. DB
+    progress check (Signal 2) runs 4 sequential checks per interval: RMAN progress
+    (`v$rman_status`), granular progress (`v$session_longops`), wait-event diagnosis (`v$session`),
+    and an independent FRA fullness warning (`v$recovery_file_dest`, `fra_check_enabled` /
+    `fra_warning_pct`) that never affects the stall decision, only logs a warning.
 - **MAIL_CONFIG**: Email settings.
   - `daily_mail_hour`: Hour to send summary (23 = 11 PM), or `"all"` for every run.
   - `weekly_summary_day`: Day-of-week (0=Monday–6=Sunday) to include 7-day history in daily mail (e.g., 0=Monday morning shows last week). Use -1 to disable.

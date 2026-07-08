@@ -2,6 +2,20 @@
 
 All notable changes to the backup system are documented in this file.
 
+## [Unreleased]
+
+### Added
+- **Watchdog Kontrol 2-4 (spec §11.4.1):** DB progress check (Signal 2) now runs all 4 checks
+  sequentially in a single sqlplus round trip: Kontrol 1 (`v$rman_status` mbytes_processed),
+  Kontrol 2 (`v$session_longops` freshness), Kontrol 3 (`v$session` wait-event diagnosis),
+  Kontrol 4 (`v$recovery_file_dest` FRA fullness — independent, warning-only, does not affect
+  stall decision). First check to report activity wins; no unnecessary DB round trips.
+- Watchdog Kontrol 3 diagnostic (wait event + blocking session) is now captured and appended to
+  the RMAN STALL/FAILED error message, so root cause (lock contention, idle client, I/O wait) is
+  visible without a separate DB lookup.
+- New config keys under `BACKUP_CONFIG.watchdog`: `progress_check_tolerance_min` (Kontrol 1
+  start_time filter tolerance), `fra_check_enabled`, `fra_warning_pct`.
+
 ## [7.0.0] - 2026-07-04
 
 ### Major: Multi-Instance Refactor & Production-Ready Features (Faz 1 & 2 & 3)

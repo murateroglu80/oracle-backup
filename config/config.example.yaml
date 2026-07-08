@@ -56,11 +56,14 @@ BACKUP_CONFIG:
   watchdog:
     enabled: True                  # False = eski sınırsız-bekleme davranışı
     idle_timeout_min: 30           # hiçbir sinyal yokken bu kadar dk = STALLED
-    progress_check_enabled: True   # Sinyal 2 (DB v$rman_status ilerleme sorgusu)
+    progress_check_enabled: True   # Sinyal 2 (Kontrol 1-3: v$rman_status/v$session_longops/v$session)
     progress_check_interval_min: 5 # DB'yi yormamak için seyrek
+    progress_check_tolerance_min: 5 # Kontrol 1'in start_time filtresi toleransı
     os_pid_check_enabled: True     # Sinyal 3 (uzak süreç kill -0)
     max_runtime_min: 0             # 0 = SINIRSIZ (opt-in mutlak üst sınır)
     kill_on_stall: False           # stall'da uzak süreci öldürme girişimi (default kapalı)
+    fra_check_enabled: True        # Kontrol 4 (FRA/archive dest doluluk) — bağımsız açılıp kapatılabilir
+    fra_warning_pct: 95            # Kontrol 4 eşik değeri (>= bu yüzdede WARNING loglanır)
 
 # RMAN Template - Her bölüm True/False ile açılıp kapatılabilir
 RMAN_TEMPLATE:

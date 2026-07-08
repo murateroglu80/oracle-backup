@@ -113,7 +113,11 @@ Tüm gerçek yapılandırma dosyaları (`.example.yaml` hariç) `.gitignore`'da 
   - `backup_root`: Yedekleme kök dizini.
   - `log_dir`, `history_dir`, `pid_file`: Boş bırakılırsa instance_id ile otomatik namespace edilir.
   - `temp_dir`: SQL/RMAN geçici dosyaları için (örn. `/tmp`).
-  - `watchdog`: Stall tespiti — output, DB progress, OS PID canlılığı monitörleme.
+  - `watchdog`: Stall tespiti — output, DB progress, OS PID canlılığı monitörleme. DB progress
+    kontrolü (Sinyal 2) her turda sırayla 4 kontrol çalıştırır: RMAN ilerleme (`v$rman_status`),
+    granüler ilerleme (`v$session_longops`), wait-event teşhisi (`v$session`) ve stall kararını
+    ETKİLEMEYEN, bağımsız FRA doluluk uyarısı (`v$recovery_file_dest`, `fra_check_enabled` /
+    `fra_warning_pct`).
   - `host_lock_enabled`: Aynı sunucudaki backupları serial hale getir.
   - `transfer_method`: `scp` (Windows) veya `rsync` (Linux).
   - `transfer_hours`: Transfer yapılacak saatler; `"all"` = her run'da.

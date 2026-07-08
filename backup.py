@@ -317,7 +317,8 @@ def main(config_file="config.yaml", dry_run=False, test_mail=False, test_transfe
         # Watchdog DB progress check (Sinyal 2) + run_rman sarmalayıcısı (temp_dir/watchdog inject)
         progress_check_fn = None
         if watchdog_cfg.get("progress_check_enabled", True):
-            progress_check_fn = make_rman_progress_check(ssh_client, env, db_creds, logger, temp_dir)
+            progress_check_fn = make_rman_progress_check(ssh_client, env, db_creds, logger, temp_dir,
+                                                          watchdog_cfg=watchdog_cfg)
 
         def run_rman_fn(logger_, env_, ssh_, script_, label="rman", db_creds=None):
             return run_rman(logger_, env_, ssh_, script_, label=label, db_creds=db_creds,
