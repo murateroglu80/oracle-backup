@@ -41,9 +41,13 @@ BACKUP_CONFIG:
   space_buffer_pct: 0.20
   keep_days: 7
   remote_dest: "oracle@192.168.1.100:/share/oracle"
-  os_type: "lin"           # Uzak sunucu OS: "lin" veya "win"
+  os_type: "lin"           # Uzak sunucu OS: "lin" veya "win" (transfer + resend doğrulaması bunu kullanır)
   transfer_method: "scp"   # "rsync" veya "scp"
   transfer_hours: [20]     # [20, 23] gibi liste ya da "all" (her run'da transfer)
+  # Pre-backup dayanıklılık: yeni backup'tan ÖNCE son başarılı yedeğin uzak hedefe dosya-bazında
+  # (ad+boyut) TAM geçtiğini doğrula; eksik/yarım ise yeniden gönder. Başarısız olsa bile yeni
+  # backup yine alınır (bloklamaz). Elle tetikleme: `run.sh --config X --resend [DDMMYY|yol]`.
+  pre_backup_resend_enabled: True
   device_type: "DISK"      # DISK veya SBT_TAPE
   parallelism: 4
   rman_script_file: ""     # Opsiyonel: özel .rman dosyası. Boş = RMAN_TEMPLATE kullan
@@ -55,13 +59,23 @@ BACKUP_CONFIG:
   # --- Canlılık bazlı watchdog (spec §11.4): uzun RMAN/transfer stall tespiti ---
   watchdog:
     enabled: True                  # False = eski sınırsız-bekleme davranışı
-    idle_timeout_min: 30           # hiçbir sinyal yokken bu kadar dk = STALLED
-    progress_check_enabled: True   # Sinyal 2 (Kontrol 1-3: v$rman_status/v$session_longops/v$session)
+    # idle_timeout_min: hiçbir CANLILIK sinyali yokken bu kadar dk sonra STALLED. Tek bir büyük
+    # datafile parçası yazılırken RMAN stdout'a uzun süre hiçbir şey basmaz (Sinyal 1 susar);
+    # bu süre boyunca canlılığı Sinyal 2 (DB progress) taşır. ÇOK BÜYÜK datafile'ları olan
+    # veritabanlarında bu değeri artırın (ör. 90-120) — güvenlik ağı olarak.
+    idle_timeout_min: 30
+    # Sinyal 2 (Kontrol 1-4): v$rman_status / v$session_longops / v$session / v$recovery_file_dest.
+    # NOT: Bu kontrol için CREDENTIALS_CONFIG'te DB kullanıcı/şifre GEREKLİDİR (sqlplus ile bağlanır).
+    # Kimlik yoksa Sinyal 2 devre dışı kalır ve uzun sessiz backup'larda yanlış STALL riski artar.
+    # Tüm zaman karşılaştırmaları DB tarafında SYSDATE ile yapılır (jump/DB saat farkından etkilenmez).
+    progress_check_enabled: True
     progress_check_interval_min: 5 # DB'yi yormamak için seyrek
-    progress_check_tolerance_min: 5 # Kontrol 1'in start_time filtresi toleransı
+    progress_check_tolerance_min: 5 # Kontrol 1'in start_time filtresi toleransı (SYSDATE - dk/1440)
     os_pid_check_enabled: True     # Sinyal 3 (uzak süreç kill -0)
     max_runtime_min: 0             # 0 = SINIRSIZ (opt-in mutlak üst sınır)
-    kill_on_stall: False           # stall'da uzak süreci öldürme girişimi (default kapalı)
+    # kill_on_stall: STALL'da uzak RMAN sürecini öldürme girişimi. VARSAYILAN KAPALI kalmalı:
+    # yanlış-pozitif bir STALL'da bile çalışan gerçek backup öldürülmez (yalnızca jump 'FAILED' raporlar).
+    kill_on_stall: False
     fra_check_enabled: True        # Kontrol 4 (FRA/archive dest doluluk) — bağımsız açılıp kapatılabilir
     fra_warning_pct: 95            # Kontrol 4 eşik değeri (>= bu yüzdede WARNING loglanır)
 

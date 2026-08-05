@@ -115,9 +115,9 @@ def run_command_wrapper(ssh_client, cmd, logger, env_dict=None, timeout=DEFAULT_
 
     if not quiet and logger:
         for line in out.splitlines():
-            logger.debug(f"  [STDOUT] {line}")
+            logger.debug(f"  [STDOUT] {line}", extra={"raw": True})
         for line in err.splitlines():
-            logger.debug(f"  [STDERR] {line}")
+            logger.debug(f"  [STDERR] {line}", extra={"raw": True})
 
     return status, out, err
 
@@ -213,7 +213,7 @@ def run_long_command(ssh_client, cmd, logger, env_dict=None, watchdog=None, prog
                 last_activity = time.time()
                 _consume_pid("".join(out_buf[-4:]))
                 if not quiet and logger:
-                    logger.debug(f"  [STREAM] {out_buf[-1].rstrip()}")
+                    logger.debug(f"  [STREAM] {out_buf[-1].rstrip()}", extra={"raw": True})
             if chan.exit_status_ready() and not chan.recv_ready() and not chan.recv_stderr_ready():
                 done = True
                 continue
@@ -259,7 +259,7 @@ def run_long_command(ssh_client, cmd, logger, env_dict=None, watchdog=None, prog
                 out_buf.append(line); last_activity = time.time()
                 _consume_pid(line)
                 if not quiet and logger:
-                    logger.debug(f"  [STREAM] {line.rstrip()}")
+                    logger.debug(f"  [STREAM] {line.rstrip()}", extra={"raw": True})
         if proc.poll() is not None:
             for line in proc.stdout:
                 out_buf.append(line)

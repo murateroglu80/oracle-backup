@@ -8,6 +8,8 @@ Bu Python betiği, Oracle veritabanları için gelişmiş RMAN yedekleme otomasy
 - **Org-Geneli Paylaşılmış Yapılandırma:** SMTP/monitoring ayarlarını tek `config/shared.yaml` dosyasında tanımlayın (her veritabanında tekrar yazmayın).
 - **Veritabanı-Bilgisi Mail:** Geçmiş, `db_name` (ORACLE_SID) başlı tutulur; günlük mail veritabanına göre filtreler — çok-DB ortamlarında maillar karışmaz.
 - **Haftalık Özet:** Haftanın belirli bir gününü seçerek günlük mail'in içine son 7 günün özet tablosu eklenir.
+- **Aylık Özet:** Ayın son takvim gününde günlük mail'e "Aylık Özet" bölümü eklenir: başarı oranı donut'u (maile gömülü PNG, Outlook uyumlu; Pillow kurulu değilse saf-CSS oran çubuğuna düşer) + toplamlar tablosu (çalışma sayısı, başarılı/başarısız/uyarı, toplam veri, ort. süre).
+- **Transfer Doğrulama & Yeniden Gönderme:** Her backup öncesi son başarılı yedek uzak hedefte dosya-bazında (ad+boyut) doğrulanır; eksik/yarım dosyalar önce yeniden gönderilir (`pre_backup_resend_enabled`, yeni backup'ı bloklamaz). Elle: `--resend [DDMMYY|yol]` ile son veya belirli bir yedek gönderilir. Hem Windows (scp) hem Linux (rsync) hedef desteklenir.
 - **Yedek Türü Kaydı:** Hangi RMAN bileşenleri (full/archive/controlfile/spfile) açık olduğu kaydedilir (denetim/analiz için).
 - Yedekleme geçmişi (JSONL yapılandırılmış logging) ve akıllı disk alanı yönetimi.
 - **HashiCorp Vault, Lokal, veya Bağımsız mod:** Pluggable `SecretsProvider` ile DB & SMTP kimlik bilgileri (instance başına seçim).
@@ -191,6 +193,18 @@ Süreci çok daha kolay yönetmek ve her seferinde sanal ortam (`venv`) oluştur
 
 # Farklı bir konfigürasyon dosyası ile çalıştırmak isterseniz:
 ./run.sh --config config-db2.yaml
+
+# Konsol ayrıntı seviyesi: normal bir yedek çalışmasında ekran varsayılan olarak sessizdir
+# (yalnızca WARNING/ERROR); her şey yine de log dosyasına yazılır. Çalıştırılan komutları ve RMAN
+# script'ini ekranda görmek için --show-command kullanın (RMAN'in satır satır canlı akışı yine
+# yalnızca log'da kalır):
+./run.sh --config config-db2.yaml --show-command
+# İpucu: tam ayrıntıyı `tail -f <log_dir>/backup_latest.log` ile izleyebilirsiniz.
+
+# Bir yedeği uzak hedefe yeniden gönder (dosya-bazında doğrula, yalnızca eksik/yarım olanı gönder):
+./run.sh --config config-db2.yaml --resend            # son başarılı yedek
+./run.sh --config config-db2.yaml --resend 050826     # belirli bir yedek klasörü (DDMMYY)
+./run.sh --config config-db2.yaml --resend /backup/MIPDB/AUG/050826   # ya da tam yol
 
 # Eski yedekleme loglarını temizlemek (geçmiş bozulmaz):
 ./run.sh --config config-db2.yaml --clear-logs     # etkileşimli onay

@@ -4,6 +4,20 @@ All notable changes to the backup system are documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- **Watchdog false-positive STALL from cross-server clock skew (Kontrol 1 & 2):** the DB progress
+  check compared the jump server's wall-clock (`datetime.now()`) against DB-server timestamps
+  (`v$rman_status.start_time`, `v$session_longops.last_update_time`). When the jump and DB clocks
+  or timezones differed, K1's `start_time` filter excluded the live RMAN row and K2 judged all
+  longops "stale", so Signal 2 never reported liveness — a genuinely-progressing backup (silent on
+  stdout while writing a single large datafile piece) was wrongly declared STALLED (rc=124) and
+  marked FAILED. All time math now runs **DB-side via `SYSDATE`** (`start_time >= SYSDATE - m/1440`;
+  K2 returns `FRESH`/`STALE` computed in SQL), so jump/DB clock differences no longer matter.
+- **Watchdog progress check observability:** each check now debug-logs K1 mbytes delta, K2
+  freshness, and the overall alive/not-alive decision; a failed check (`rc != 0`) now logs a
+  WARNING with the sqlplus error snippet instead of failing silently — so repeated check failures
+  are visible before they can accumulate into a false STALL.
+
 ### Added
 - **Watchdog Kontrol 2-4 (spec §11.4.1):** DB progress check (Signal 2) now runs all 4 checks
   sequentially in a single sqlplus round trip: Kontrol 1 (`v$rman_status` mbytes_processed),
@@ -15,6 +29,30 @@ All notable changes to the backup system are documented in this file.
   visible without a separate DB lookup.
 - New config keys under `BACKUP_CONFIG.watchdog`: `progress_check_tolerance_min` (Kontrol 1
   start_time filter tolerance), `fra_check_enabled`, `fra_warning_pct`.
+- **`--show-command` flag:** echoes the executed commands and the RMAN script to the console
+  during a backup run (the line-by-line live RMAN stream stays only in the log). Live raw output
+  (`[STREAM]/[STDOUT]/[STDERR]`) is filtered out of the console in all cases.
+- **Transfer verification & resend (pre-backup + `--resend`):** backups are now verified on the
+  remote destination file-by-file (name + byte size) via a new manifest compare in
+  `modules/transfer.py` (`verify_remote_backup`; Windows targets listed via PowerShell `.Length`,
+  Linux via `find -printf`). Before each new backup, the last successful backup is verified and any
+  missing/incomplete files are re-sent first (`BACKUP_CONFIG.pre_backup_resend_enabled`, default
+  True; failures are logged but do NOT block the new backup). New `--resend [FOLDER]` CLI mode
+  re-sends the last successful backup (bare `--resend`) or a specific one (`--resend <DDMMYY|path>`)
+  and exits. The inline transfer path was refactored to share the same path-building / send helpers
+  (`build_remote_paths`, `ensure_remote_dir`, `send_backup_dir`) so live transfer and resend always agree.
+- **Monthly summary in daily mail:** on the last calendar day of the month, the daily summary
+  email gains a "Monthly Summary" section — a success-rate donut chart (CID-embedded PNG via the
+  new `modules/charts.py`, Outlook-safe) plus a totals table (total runs, success/fail/warn,
+  total data GB, success rate, avg duration) for the whole month, DB-filtered like the daily/weekly
+  sections. `Pillow` is an **optional** dependency: if absent, the section renders a pure-CSS
+  proportion bar instead and the mail still sends. No new config key (triggers automatically).
+
+### Changed
+- **Quieter console by default:** a normal backup run now prints only WARNING/ERROR to the
+  console; all INFO progress and command detail continue to be written in full to the `.log` and
+  `.jsonl` files. Diagnostic modes (`--test-*`, `--dry-run`) still print their results at INFO.
+  Use `--show-command` for the previous verbose command/script view on screen.
 
 ## [7.0.0] - 2026-07-04
 
