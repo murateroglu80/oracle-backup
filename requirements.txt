@@ -2,3 +2,5 @@ PyYAML>=5.1
 requests>=2.20.0
 hvac>=0.10.0
 paramiko
+# Aylık özet raporundaki başarı donut'u için (yoksa mail CSS oran çubuğuna düşer — zorunlu değil).
+Pillow>=9.0.0
