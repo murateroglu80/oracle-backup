@@ -7,7 +7,6 @@ RMAN başarısız olursa aynı run içinde OTOMATİK RETRY YAPILMAZ (spec §11.1
 
 import re
 import time
-from datetime import datetime, timedelta
 
 from .connection import run_command_wrapper, run_long_command, execute_oracle_sql, STALL_STATUS
 
@@ -57,9 +56,12 @@ def make_rman_progress_check(ssh_client, env, db_creds, logger, temp_dir="/tmp",
     freshness_min = max(interval_min * 2, 10)
 
     conn_str = _db_conn_str(db_creds, sysdba=True)
-    # K1'in start_time filtresi run başlangıcına sabitlenir (spec §11.4.1): bu run'a ait olmayan
-    # eski/başka RMAN oturumlarını "canlı" sayan yanlış-pozitifi engeller.
-    run_start_floor = (datetime.now() - timedelta(minutes=tolerance_min)).strftime("%Y-%m-%d %H:%M:%S")
+    # ÖNEMLİ (spec §11.4.1): TÜM zaman karşılaştırmaları DB tarafında SYSDATE ile yapılır.
+    # Jump ile DB sunucusu arasında saat/timezone farkı olsa bile K1 start_time filtresi ve K2
+    # tazelik kontrolü bozulmaz. (Aksi halde canlı bir backup yanlışlıkla STALL sayılır — 2026-08-05
+    # yanlış-pozitif STALL olayı tam olarak jump-tarafı datetime.now() kullanımından kaynaklandı.)
+    # tolerance_min: K1'in bu run'a ait olmayan eski RMAN oturumlarını elemesi için start_time
+    # penceresi (dakika/1440 = gün). freshness_min: K2 longops güncellik penceresi.
     state = {"last_mbytes": -1.0, "last_diag": None}
 
     def check():
@@ -67,9 +69,10 @@ def make_rman_progress_check(ssh_client, env, db_creds, logger, temp_dir="/tmp",
             "SET HEADING OFF FEEDBACK OFF PAGESIZE 0 LINESIZE 500 VERIFY OFF ECHO OFF TRIMSPOOL ON\n"
             "PROMPT ===K1===\n"
             "SELECT NVL(SUM(mbytes_processed),0) FROM v$rman_status\n"
-            f"WHERE status LIKE 'RUNNING%' AND start_time >= TO_DATE('{run_start_floor}','YYYY-MM-DD HH24:MI:SS');\n"
+            f"WHERE status LIKE 'RUNNING%' AND start_time >= SYSDATE - ({tolerance_min}/1440);\n"
             "PROMPT ===K2===\n"
-            "SELECT TO_CHAR(MAX(last_update_time),'YYYY-MM-DD HH24:MI:SS') FROM v$session_longops\n"
+            f"SELECT CASE WHEN MAX(last_update_time) >= SYSDATE - ({freshness_min}/1440)\n"
+            "            THEN 'FRESH' ELSE 'STALE' END FROM v$session_longops\n"
             "WHERE opname LIKE 'RMAN%' AND totalwork > 0 AND sofar < totalwork;\n"
             "PROMPT ===K3===\n"
             "SELECT event || '|' || NVL(TO_CHAR(blocking_session),'') FROM (\n"
@@ -84,7 +87,12 @@ def make_rman_progress_check(ssh_client, env, db_creds, logger, temp_dir="/tmp",
         st, out, err = execute_oracle_sql(ssh_client, conn_str, sql, logger, env_dict=env,
                                           temp_dir=temp_dir, timeout=600, quiet=True)
         if st != 0:
-            return False  # o tur sinyal alınamadı — stall kanıtı SAYILMAZ (spec §11.4.1)
+            # O tur sinyal alınamadı — stall kanıtı SAYILMAZ (spec §11.4.1). Ancak SESSIZ kalmaz:
+            # gerçek sunucuda tekrarlayan bağlantı/SQL hatası, canlı backup'ı yanlış STALL'a
+            # sürükleyebileceğinden görünür loglanır (gözlemlenebilirlik).
+            snippet = (err or out or "").strip().replace("\n", " ")[:200]
+            logger.warning(f"Watchdog DB progress check could not run (rc={st}): {snippet}")
+            return False
 
         alive = False
 
@@ -96,18 +104,18 @@ def make_rman_progress_check(ssh_client, env, db_creds, logger, temp_dir="/tmp",
         if mbytes is not None:
             if mbytes > state["last_mbytes"]:
                 alive = True
+            logger.debug(f"Watchdog K1 mbytes_processed={mbytes} (prev={state['last_mbytes']}) alive={alive}")
             state["last_mbytes"] = mbytes
 
-        # Kontrol 2 — Kontrol 1 canlılık göstermediyse: last_update_time taze mi?
+        # Kontrol 2 — Kontrol 1 canlılık göstermediyse: longops DB-tarafı tazelik ('FRESH'/'STALE').
+        # Jump saati KULLANILMAZ; tazelik SYSDATE ile SQL içinde hesaplanır. Aktif longops satırı
+        # yoksa MAX(...) NULL → 'STALE' (güvenli varsayılan).
         if not alive:
-            k2_raw = _section(out, "K2", "K3")
+            k2_raw = _section(out, "K2", "K3").upper()
             if k2_raw:
-                try:
-                    last_upd = datetime.strptime(k2_raw, "%Y-%m-%d %H:%M:%S")
-                    if (datetime.now() - last_upd).total_seconds() <= freshness_min * 60:
-                        alive = True
-                except ValueError:
-                    pass
+                logger.debug(f"Watchdog K2 longops freshness={k2_raw}")
+                if k2_raw.startswith("FRESH"):
+                    alive = True
 
         # Kontrol 3 — Kontrol 1-2 canlılık göstermediyse: wait event teşhisi.
         # Sonuç ne olursa olsun (spec §11.4.1) teşhis bilgisi kaydedilir — bir sonraki
@@ -136,6 +144,7 @@ def make_rman_progress_check(ssh_client, env, db_creds, logger, temp_dir="/tmp",
                     "RMAN archiver'da beklemede kalabilir (log file switch)."
                 )
 
+        logger.debug(f"Watchdog progress check result: alive={alive}")
         return alive
 
     check.diag_state = state
