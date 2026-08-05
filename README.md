@@ -8,6 +8,8 @@ Advanced RMAN backup automation for Oracle databases with **multi-instance/multi
 - **Org-Wide Shared Config:** Common SMTP/monitoring settings in single `config/shared.yaml` (no per-database repetition).
 - **Database-Aware Mail:** History tracks `db_name` (ORACLE_SID); daily mail filters by database — multi-DB environments don't mix in one mail.
 - **Weekly Summary:** Configurable weekly summary section (last 7 days) in daily mail on designated day-of-week.
+- **Monthly Summary:** On the last calendar day of the month the daily mail gains a "Monthly Summary" section: a success-rate donut (embedded PNG, Outlook-safe; falls back to a pure-CSS bar if Pillow is not installed) plus a totals table (runs, success/fail/warn, total data, avg duration).
+- **Transfer Verification & Resend:** Before each backup, the last successful backup is verified file-by-file (name + size) on the remote destination and any missing/incomplete files are re-sent first (`pre_backup_resend_enabled`, non-blocking). Manual re-send of the last or a specific backup via `--resend [DDMMYY|path]`. Works with both Windows (scp) and Linux (rsync) targets.
 - **Backup Type Tracking:** Records which RMAN components (full/archive/controlfile/spfile) were enabled per backup for audit/analytics.
 - Backup history tracking (JSONL structured logging + JSON file history) and smart disk space management.
 - **HashiCorp Vault, Local, or standalone mode** for DB & SMTP credentials (pluggable `SecretsProvider`).
@@ -90,10 +92,15 @@ All real configs (`.yaml`, not `.example.yaml`) are in `.gitignore` — safe to 
   - `remote_dest`: The final remote server where backups will be copied.
   - `transfer_method`: `scp` for Windows targets, `rsync` for Linux.
   - `transfer_hours`: Transfer hour(s), or `"all"` for transferring on every run.
-  - `watchdog`: Stall detection for long-running RMAN/transfer; see spec §11.4 for details.
+  - `watchdog`: Stall detection for long-running RMAN/transfer; see spec §11.4 for details. DB
+    progress check (Signal 2) runs 4 sequential checks per interval: RMAN progress
+    (`v$rman_status`), granular progress (`v$session_longops`), wait-event diagnosis (`v$session`),
+    and an independent FRA fullness warning (`v$recovery_file_dest`, `fra_check_enabled` /
+    `fra_warning_pct`) that never affects the stall decision, only logs a warning.
 - **MAIL_CONFIG**: Email settings.
   - `daily_mail_hour`: Hour to send summary (23 = 11 PM), or `"all"` for every run.
   - `weekly_summary_day`: Day-of-week (0=Monday–6=Sunday) to include 7-day history in daily mail (e.g., 0=Monday morning shows last week). Use -1 to disable.
+  - Monthly summary: no config needed — automatically appended on the last calendar day of the month. Requires `Pillow` for the donut chart (optional; falls back to a CSS bar otherwise).
   - `subject_prefix`: Prepended to mail subject; actual subject format: `[prefix] [severity] Daily Summary | SID` (e.g., `[HUARIS-BACKUP] [INFO] Daily Summary | MIPDB`).
 
 ### Sensitive Settings (`vault_config.yaml`)
@@ -159,6 +166,17 @@ To manage the process much easier and avoid creating/activating a virtual enviro
 
 # If you want to use a different configuration file:
 ./run.sh --config config-db2.yaml
+
+# Console verbosity: by default a normal backup run keeps the screen quiet (only WARNING/ERROR);
+# everything still goes to the log file. Use --show-command to echo the executed commands and the
+# RMAN script to the console (the line-by-line live RMAN stream stays only in the log):
+./run.sh --config config-db2.yaml --show-command
+# Tip: follow the full detail with `tail -f <log_dir>/backup_latest.log`.
+
+# Re-send a backup to the remote destination (verify file-by-file, send only what's missing/incomplete):
+./run.sh --config config-db2.yaml --resend            # last successful backup
+./run.sh --config config-db2.yaml --resend 050826     # a specific backup folder (DDMMYY)
+./run.sh --config config-db2.yaml --resend /backup/MIPDB/AUG/050826   # or an explicit path
 
 # Clean up old backup logs (keeps history):
 ./run.sh --config config-db2.yaml --clear-logs     # interactive confirmation

@@ -2,15 +2,34 @@
 
 import json
 import os
+import re
 import smtplib
 from datetime import datetime, timedelta
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+from email.mime.image import MIMEImage
 from email.header import Header
 
 from .history import get_history_file
+from .utils import format_duration
+from .charts import make_success_donut
 
 __all__ = ["send_daily_summary"]
+
+# Aylık donut'un maile gömüldüğü Content-ID (HTML'de src="cid:..." ile eşleşir).
+_MONTHLY_CHART_CID = "monthly_success_chart"
+
+
+def _duration_to_seconds(dur):
+    """format_duration çıktısını ('Xh YYm ZZs' / 'Ym ZZs') saniyeye çevirir. Bozuksa 0."""
+    if not dur:
+        return 0
+    h = re.search(r"(\d+)h", dur)
+    m = re.search(r"(\d+)m", dur)
+    s = re.search(r"(\d+)s", dur)
+    return ((int(h.group(1)) * 3600 if h else 0)
+            + (int(m.group(1)) * 60 if m else 0)
+            + (int(s.group(1)) if s else 0))
 
 
 def _load_records_range(history_dir, start_date, end_date, db_name=None):
@@ -111,6 +130,118 @@ def _build_weekly_section(history_dir, target_date_str, db_name):
             <tbody>{rows}</tbody>
         </table>
     """
+
+
+def _legend_row(color, label, count, total):
+    pct = round(100.0 * count / total, 1) if total else 0
+    return f"""
+        <tr>
+            <td style="padding:4px 8px;"><span style="display:inline-block;width:12px;height:12px;
+                background:{color};border-radius:2px;vertical-align:middle;"></span></td>
+            <td style="padding:4px 8px;color:#444;font-size:14px;">{label}</td>
+            <td style="padding:4px 8px;color:#444;font-size:14px;text-align:right;font-weight:bold;">{count}</td>
+            <td style="padding:4px 8px;color:#888;font-size:13px;text-align:right;">%{pct}</td>
+        </tr>"""
+
+
+def _css_bar(success, fail, warn, total):
+    """Pillow yoksa donut yerine kullanılan saf-CSS oran çubuğu (her istemcide uyumlu)."""
+    cells = ""
+    for color, val in (("#27ae60", success), ("#e74c3c", fail), ("#f39c12", warn)):
+        if val <= 0:
+            continue
+        w = round(100.0 * val / total, 2)
+        cells += f'<td style="background:{color};height:28px;width:{w}%;"></td>'
+    return f"""
+        <table style="width:200px;border-collapse:collapse;border-radius:4px;overflow:hidden;">
+            <tr>{cells}</tr>
+        </table>"""
+
+
+def _build_monthly_section(history_dir, target_date_str, db_name):
+    """Ayın son gününde günlük mailin altına eklenecek 'Aylık Özet' bloğu.
+
+    Kapsam: içinde bulunulan ayın 1'i .. target_date (dahil). Başarı donut'u (Pillow varsa PNG,
+    yoksa CSS oran çubuğu) + toplamlar tablosu. Ay boşsa ("", None) döner (bölüm eklenmez).
+    Dönüş: (html, png_bytes|None) — png_bytes maile CID ile gömülür.
+    """
+    end_dt = datetime.strptime(target_date_str, "%Y-%m-%d")
+    start_dt = end_dt.replace(day=1)
+    runs = [r for r in _load_records_range(history_dir, start_dt, end_dt, db_name=db_name)
+            if not r.get("is_deleted")]
+
+    success = fail = warn = 0
+    total_gb = 0.0
+    dur_total = dur_count = 0
+    for r in runs:
+        st = (r.get("status") or "").upper()
+        if "SUCCESS" in st or "COMPLETED" in st:
+            success += 1
+        elif "FAIL" in st or "ERROR" in st:
+            fail += 1
+        else:
+            warn += 1
+        try:
+            total_gb += float(r.get("size_gb") or 0)
+        except (TypeError, ValueError):
+            pass
+        secs = _duration_to_seconds(r.get("duration") or "")
+        if secs > 0:
+            dur_total += secs
+            dur_count += 1
+
+    total = success + fail + warn
+    if total == 0:
+        return "", None
+
+    rate = round(100.0 * success / total, 1)
+    avg_dur = format_duration(dur_total / dur_count) if dur_count else "-"
+    range_label = f"{start_dt.strftime('%d.%m.%Y')} - {end_dt.strftime('%d.%m.%Y')}"
+
+    png = make_success_donut(success, fail, warn)
+    if png:
+        visual = (f'<img src="cid:{_MONTHLY_CHART_CID}" width="180" height="180" '
+                  f'alt="Başarı oranı" style="display:block;">')
+    else:
+        visual = _css_bar(success, fail, warn, total)
+
+    legend = (_legend_row("#27ae60", "Başarılı", success, total)
+              + _legend_row("#e74c3c", "Başarısız", fail, total)
+              + _legend_row("#f39c12", "Uyarı/Diğer", warn, total))
+
+    def _cell(label, value):
+        return (f'<td style="padding:10px;border:1px solid #eee;text-align:center;">'
+                f'<div style="font-size:12px;color:#888;">{label}</div>'
+                f'<div style="font-size:18px;font-weight:bold;color:#333;">{value}</div></td>')
+
+    totals_table = f"""
+        <table style="width:100%;border-collapse:collapse;margin-top:16px;box-shadow:0 1px 3px rgba(0,0,0,0.1);">
+            <tr style="background:#fafafa;">
+                {_cell("Toplam Çalışma", total)}
+                {_cell("Başarılı", success)}
+                {_cell("Başarısız", fail)}
+                {_cell("Uyarı/Diğer", warn)}
+                {_cell("Başarı Oranı", f"%{rate}")}
+                {_cell("Toplam Veri", f"{round(total_gb, 1)} GB")}
+                {_cell("Ort. Süre", avg_dur)}
+            </tr>
+        </table>"""
+
+    html = f"""
+        <h3 style="border-bottom: 2px solid #eee; padding-bottom: 10px; color: #555; margin-top: 30px;">
+            Aylık Özet ({range_label})
+        </h3>
+        <table style="width:100%;border-collapse:collapse;">
+            <tr>
+                <td style="width:200px;vertical-align:middle;text-align:center;padding:10px;">{visual}</td>
+                <td style="vertical-align:middle;padding:10px;">
+                    <table style="border-collapse:collapse;">{legend}</table>
+                </td>
+            </tr>
+        </table>
+        {totals_table}
+    """
+    return html, png
 
 
 def send_daily_summary(history_dir, mail_config, smtp_password, logger, target_date=None, target_server=None, oracle_config=None, backup_config=None, rman_report_html="", db_name=None):
@@ -240,6 +371,18 @@ def send_daily_summary(history_dir, mail_config, smtp_password, logger, target_d
         if today_weekday == weekly_day:
             weekly_html = _build_weekly_section(history_dir, target_date, db_name)
 
+    # Aylık özet: ayın SON gününde günlük mailin altına başarı donut'u + toplamlar eklenir.
+    # Son gün tespiti: yarın ayın 1'i ise bugün ayın son günüdür.
+    monthly_html = ""
+    monthly_png = None
+    try:
+        _md = datetime.strptime(target_date, "%Y-%m-%d")
+        is_month_end = (_md + timedelta(days=1)).day == 1
+    except (ValueError, TypeError):
+        is_month_end = False
+    if is_month_end:
+        monthly_html, monthly_png = _build_monthly_section(history_dir, target_date, db_name)
+
     html_body = f"""
     <html>
     <body style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; color: #333; line-height: 1.6;">
@@ -286,6 +429,8 @@ def send_daily_summary(history_dir, mail_config, smtp_password, logger, target_d
 
                 {weekly_html}
 
+                {monthly_html}
+
                 <div style="margin-top: 20px; font-size: 0.9em; color: #777; border-top: 1px solid #eee; padding-top: 10px;">
                     Daily Overview: {success_count} Success / {total_count} Total runs today.<br>
                     Notification Level: {notification_level}
@@ -310,11 +455,23 @@ def send_daily_summary(history_dir, mail_config, smtp_password, logger, target_d
         logger.warning("No valid recipient addresses found. Skipping email.")
         return
 
-    msg = MIMEMultipart("alternative")
+    # Aylık donut PNG'si varsa CID ile gömmek için "related" sarmalayıcı kullan; yoksa düz
+    # "alternative" (mevcut davranış). Gömülü görsel Outlook dahil her istemcide render olur.
+    if monthly_png:
+        msg = MIMEMultipart("related")
+        alt = MIMEMultipart("alternative")
+        alt.attach(MIMEText(html_body, "html", "utf-8"))
+        msg.attach(alt)
+        img = MIMEImage(monthly_png, "png")
+        img.add_header("Content-ID", f"<{_MONTHLY_CHART_CID}>")
+        img.add_header("Content-Disposition", "inline", filename="monthly.png")
+        msg.attach(img)
+    else:
+        msg = MIMEMultipart("alternative")
+        msg.attach(MIMEText(html_body, "html", "utf-8"))
     msg["Subject"] = Header(subject, "utf-8")
     msg["From"]    = mail_config["from_addr"]
     msg["To"]      = ", ".join(to_addrs_list)
-    msg.attach(MIMEText(html_body, "html", "utf-8"))
 
     try:
         with smtplib.SMTP(mail_config["smtp_host"], mail_config["smtp_port"], timeout=30) as srv:

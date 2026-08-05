@@ -37,6 +37,15 @@ class _ContextFilter(logging.Filter):
         return True
 
 
+class _ConsoleRawFilter(logging.Filter):
+    """Ham komut ÇIKTISI kayıtlarını ([STREAM]/[STDOUT]/[STDERR], extra={"raw": True}) konsoldan
+    ayıklar — canlı akış hiçbir durumda ekrana düşmesin (yalnızca log dosyasına gider).
+    Yalnızca konsol handler'ına eklenir; file/jsonl handler'larına eklenmez."""
+
+    def filter(self, record):
+        return not getattr(record, "raw", False)
+
+
 class _JsonlFormatter(logging.Formatter):
     def format(self, record):
         obj = {
@@ -52,7 +61,7 @@ class _JsonlFormatter(logging.Formatter):
         return json.dumps(obj, ensure_ascii=False)
 
 
-def setup_logging(log_file, jsonl_file=None, instance_id="", run_id=""):
+def setup_logging(log_file, jsonl_file=None, instance_id="", run_id="", show_command=False, diagnostic=False):
     logger = logging.getLogger("rman_backup")
     logger.setLevel(logging.DEBUG)
     # Aynı process içinde tekrar çağrılırsa handler birikmesini önle.
@@ -68,9 +77,20 @@ def setup_logging(log_file, jsonl_file=None, instance_id="", run_id=""):
     fh = logging.FileHandler(log_file, encoding="utf-8")
     fh.setLevel(logging.DEBUG)
     fh.setFormatter(fmt)
+    # Konsol ayrıntı seviyesi (dosya/jsonl her zaman DEBUG — "her şey log'da"):
+    #   diagnostic (--test-*/--dry-run) : INFO   (sonuçlar ekranda görünmeli)
+    #   --show-command                  : DEBUG  (çalıştırılan komutlar + RMAN script)
+    #   varsayılan                      : WARNING (ekran sessiz, yalnızca uyarı/hata)
+    if diagnostic:
+        console_level = logging.INFO
+    elif show_command:
+        console_level = logging.DEBUG
+    else:
+        console_level = logging.WARNING
     ch = logging.StreamHandler(sys.stdout)
-    ch.setLevel(logging.INFO)
+    ch.setLevel(console_level)
     ch.setFormatter(fmt)
+    ch.addFilter(_ConsoleRawFilter())  # canlı ham çıktı ([STREAM]/[STDOUT]/[STDERR]) ekrana düşmez
     logger.addHandler(fh)
     logger.addHandler(ch)
 

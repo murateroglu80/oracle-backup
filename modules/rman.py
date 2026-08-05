@@ -8,7 +8,7 @@ RMAN başarısız olursa aynı run içinde OTOMATİK RETRY YAPILMAZ (spec §11.1
 import re
 import time
 
-from .connection import run_command_wrapper, run_long_command, execute_oracle_sql
+from .connection import run_command_wrapper, run_long_command, execute_oracle_sql, STALL_STATUS
 
 __all__ = ["check_standby_exists", "run_rman", "make_rman_progress_check"]
 
@@ -23,37 +23,131 @@ def _db_conn_str(db_creds, sysdba=True):
     return f'{user}/"{pwd}"@{host}/{db}{suffix}'
 
 
-def make_rman_progress_check(ssh_client, env, db_creds, logger, temp_dir="/tmp"):
-    """Watchdog Sinyal 2 (spec §11.4.1 Kontrol 1): v$rman_status RUNNING + mbytes_processed
-    artıyor mu? Artıyorsa iş CANLI kabul edilir (çıktı akmasa bile). DB creds yoksa None döner
-    ve Sinyal 2 otomatik devre dışı kalır (bir kez WARNING).
+def _section(out, name, next_name):
+    """Sqlplus çıktısından PROMPT ===NAME=== ile ===NEXT=== arasındaki metni çıkarır."""
+    try:
+        after = out.split(f"==={name}===", 1)[1]
+        return (after.split(f"==={next_name}===", 1)[0] if next_name else after).strip()
+    except IndexError:
+        return ""
 
-    NOT: Kontrol 2-4 (v$session_longops, wait event, FRA — spec §11.4.1) ileride bu callback'e
-    eklenebilir; Kontrol 1 birincil ilerleme sinyalidir.
+
+def make_rman_progress_check(ssh_client, env, db_creds, logger, temp_dir="/tmp", watchdog_cfg=None):
+    """Watchdog Sinyal 2 (spec §11.4.1 Kontrol 1-4): tek sqlplus oturumunda sırayla çalıştırılır.
+
+    Kontrol 1 (v$rman_status mbytes_processed artışı) -> Kontrol 2 (v$session_longops tazelik)
+    -> Kontrol 3 (v$session wait event teşhisi): ilk CANLI diyen kontrol yeterlidir, sıradakine
+    geçilmez. Kontrol 4 (FRA doluluk) K1-K3 sonucundan BAĞIMSIZ her turda ayrıca değerlendirilir;
+    stall kararını etkilemez, yalnızca eşik aşılınca WARNING loglar.
+
+    DB creds yoksa None döner ve Sinyal 2 tamamen devre dışı kalır (bir kez WARNING).
     """
     if not (db_creds and db_creds.get("username") and db_creds.get("password")):
         logger.warning("Watchdog DB progress check disabled: no DB credentials (Signal 2 off).")
         return None
 
+    wd = watchdog_cfg or {}
+    tolerance_min = wd.get("progress_check_tolerance_min", 5)
+    interval_min = wd.get("progress_check_interval_min", 5)
+    fra_check_enabled = wd.get("fra_check_enabled", True)
+    fra_warning_pct = wd.get("fra_warning_pct", 95)
+    # K2 "taze" penceresi: spec "son birkaç dakika" der, sayı vermez — kontrol periyoduna göre
+    # ölçekliyoruz (iki tur boyunca güncellenmemişse artık taze sayılmaz), en az 10 dk.
+    freshness_min = max(interval_min * 2, 10)
+
     conn_str = _db_conn_str(db_creds, sysdba=True)
-    state = {"last_mbytes": -1.0}
+    # ÖNEMLİ (spec §11.4.1): TÜM zaman karşılaştırmaları DB tarafında SYSDATE ile yapılır.
+    # Jump ile DB sunucusu arasında saat/timezone farkı olsa bile K1 start_time filtresi ve K2
+    # tazelik kontrolü bozulmaz. (Aksi halde canlı bir backup yanlışlıkla STALL sayılır — 2026-08-05
+    # yanlış-pozitif STALL olayı tam olarak jump-tarafı datetime.now() kullanımından kaynaklandı.)
+    # tolerance_min: K1'in bu run'a ait olmayan eski RMAN oturumlarını elemesi için start_time
+    # penceresi (dakika/1440 = gün). freshness_min: K2 longops güncellik penceresi.
+    state = {"last_mbytes": -1.0, "last_diag": None}
 
     def check():
-        sql = ("SET HEADING OFF FEEDBACK OFF PAGESIZE 0\n"
-               "SELECT NVL(SUM(mbytes_processed),0) FROM v$rman_status WHERE status LIKE 'RUNNING%';\n"
-               "EXIT;\n")
+        sql = (
+            "SET HEADING OFF FEEDBACK OFF PAGESIZE 0 LINESIZE 500 VERIFY OFF ECHO OFF TRIMSPOOL ON\n"
+            "PROMPT ===K1===\n"
+            "SELECT NVL(SUM(mbytes_processed),0) FROM v$rman_status\n"
+            f"WHERE status LIKE 'RUNNING%' AND start_time >= SYSDATE - ({tolerance_min}/1440);\n"
+            "PROMPT ===K2===\n"
+            f"SELECT CASE WHEN MAX(last_update_time) >= SYSDATE - ({freshness_min}/1440)\n"
+            "            THEN 'FRESH' ELSE 'STALE' END FROM v$session_longops\n"
+            "WHERE opname LIKE 'RMAN%' AND totalwork > 0 AND sofar < totalwork;\n"
+            "PROMPT ===K3===\n"
+            "SELECT event || '|' || NVL(TO_CHAR(blocking_session),'') FROM (\n"
+            "  SELECT event, blocking_session FROM v$session\n"
+            "  WHERE program LIKE '%rman%' OR module LIKE '%backup%' OR client_info LIKE '%rman%'\n"
+            "  ORDER BY seconds_in_wait DESC\n"
+            ") WHERE ROWNUM=1;\n"
+            "PROMPT ===K4===\n"
+            "SELECT NVL(MAX(ROUND(space_used/space_limit*100,1)),-1) FROM v$recovery_file_dest;\n"
+            "EXIT;\n"
+        )
         st, out, err = execute_oracle_sql(ssh_client, conn_str, sql, logger, env_dict=env,
                                           temp_dir=temp_dir, timeout=600, quiet=True)
         if st != 0:
-            return False  # o tur sinyal alınamadı — stall kanıtı SAYILMAZ (spec §11.4.1)
-        try:
-            mbytes = float(out.strip())
-        except ValueError:
+            # O tur sinyal alınamadı — stall kanıtı SAYILMAZ (spec §11.4.1). Ancak SESSIZ kalmaz:
+            # gerçek sunucuda tekrarlayan bağlantı/SQL hatası, canlı backup'ı yanlış STALL'a
+            # sürükleyebileceğinden görünür loglanır (gözlemlenebilirlik).
+            snippet = (err or out or "").strip().replace("\n", " ")[:200]
+            logger.warning(f"Watchdog DB progress check could not run (rc={st}): {snippet}")
             return False
-        alive = mbytes > state["last_mbytes"]
-        state["last_mbytes"] = mbytes
+
+        alive = False
+
+        # Kontrol 1 — mbytes_processed önceki tura göre arttıysa CANLI.
+        try:
+            mbytes = float(_section(out, "K1", "K2"))
+        except ValueError:
+            mbytes = None
+        if mbytes is not None:
+            if mbytes > state["last_mbytes"]:
+                alive = True
+            logger.debug(f"Watchdog K1 mbytes_processed={mbytes} (prev={state['last_mbytes']}) alive={alive}")
+            state["last_mbytes"] = mbytes
+
+        # Kontrol 2 — Kontrol 1 canlılık göstermediyse: longops DB-tarafı tazelik ('FRESH'/'STALE').
+        # Jump saati KULLANILMAZ; tazelik SYSDATE ile SQL içinde hesaplanır. Aktif longops satırı
+        # yoksa MAX(...) NULL → 'STALE' (güvenli varsayılan).
+        if not alive:
+            k2_raw = _section(out, "K2", "K3").upper()
+            if k2_raw:
+                logger.debug(f"Watchdog K2 longops freshness={k2_raw}")
+                if k2_raw.startswith("FRESH"):
+                    alive = True
+
+        # Kontrol 3 — Kontrol 1-2 canlılık göstermediyse: wait event teşhisi.
+        # Sonuç ne olursa olsun (spec §11.4.1) teşhis bilgisi kaydedilir — bir sonraki
+        # STALL/FAILED mesajına run_rman tarafından eklenebilsin diye state'te tutulur.
+        if not alive:
+            k3_raw = _section(out, "K3", "K4")
+            if k3_raw:
+                event, _, blocking = k3_raw.partition("|")
+                event_lower = event.strip().lower()
+                state["last_diag"] = f"wait_event={event.strip()} blocking_session={blocking or '-'}"
+                logger.debug(f"Watchdog K3 diagnostic: {state['last_diag']}")
+                if "i/o" in event_lower:
+                    alive = True
+                # enq:/idle/client bekleme durumları CANLI SAYILMAZ; Sinyal 3 (OS PID) devreye girer.
+
+        # Kontrol 4 — K1-K3 sonucundan BAĞIMSIZ, karar mantığını etkilemez, yalnızca uyarır.
+        if fra_check_enabled:
+            k4_raw = _section(out, "K4", "")
+            try:
+                pct_used = float(k4_raw)
+            except ValueError:
+                pct_used = -1.0
+            if pct_used >= fra_warning_pct:
+                logger.warning(
+                    f"FRA/archive dest doluluk %{pct_used} (eşik %{fra_warning_pct}) — "
+                    "RMAN archiver'da beklemede kalabilir (log file switch)."
+                )
+
+        logger.debug(f"Watchdog progress check result: alive={alive}")
         return alive
 
+    check.diag_state = state
     return check
 
 
@@ -114,6 +208,12 @@ exit $RC"""
 
     if found_error or status != 0:
         full_out = out + "\n" + err
+        # Watchdog Kontrol 3 teşhisi (varsa): "yaşıyor ama neden ilerlemiyor" bilgisini
+        # STALL/FAILED mesajına serbest metin olarak ekler (spec §11.4.1).
+        diag = getattr(progress_check_fn, "diag_state", None)
+        last_diag = diag.get("last_diag") if diag else None
+        diag_suffix = f" [{last_diag}]" if last_diag else ""
+
         if "immutable" in full_out.lower() and "ORA-19509" in full_out:
             if logger:
                 logger.warning(f"RMAN {label} reported an error, but it appears to be due to immutable backups preventing deletion. Ignoring error and treating as SUCCESS.")
@@ -128,8 +228,8 @@ exit $RC"""
                 found_error = False
                 logger.info("RMAN çıktısında hata tespit edildi ancak v$rman_backup_job_details tablosu yedeğin COMPLETED olduğunu doğruladı. İşlem BAŞARILI kabul ediliyor.")
             else:
-                raise RuntimeError(f"RMAN {label} failed (rc={status}). SQL validation also failed or did not report COMPLETED. See logs for ORA-/RMAN- errors.")
+                raise RuntimeError(f"RMAN {label} failed (rc={status}). SQL validation also failed or did not report COMPLETED. See logs for ORA-/RMAN- errors.{diag_suffix}")
         else:
-            raise RuntimeError(f"RMAN {label} failed (rc={status}). See logs for ORA-/RMAN- errors.")
+            raise RuntimeError(f"RMAN {label} failed (rc={status}). See logs for ORA-/RMAN- errors.{diag_suffix}")
 
     return elapsed, out

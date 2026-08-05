@@ -20,11 +20,12 @@ Multi-Instance özellikleri (bkz. oracle-backup-multi-instance-spec.md):
 
 import os
 import sys
+import json
 import argparse
 import shutil
 import time
 import smtplib
-from datetime import datetime
+from datetime import datetime, timedelta
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.header import Header
@@ -34,10 +35,12 @@ from modules.logging_setup import setup_logging
 from modules.connection import get_ssh_client, execute_oracle_sql, run_command_wrapper
 from modules.secrets import get_secrets_provider
 from modules.locking import acquire_lock, release_lock, acquire_host_lock, release_host_lock
-from modules.history import append_history, mark_history_deleted, generate_run_id, BackupRecord
+from modules.history import (append_history, mark_history_deleted, generate_run_id, BackupRecord,
+                             get_history_file)
 from modules.space import ensure_free_space, get_dir_size_gb, list_daily_dirs
 from modules.rman import check_standby_exists, run_rman, make_rman_progress_check
-from modules.transfer import run_scp, run_rsync
+from modules.transfer import (run_scp, run_rsync, build_remote_paths, verify_remote_backup,
+                              send_backup_dir)
 from modules.monitoring import push_metrics
 from modules.mailing import send_daily_summary
 from modules.status import collect_fleet_status, format_status_table, STATUS_STALE_HOURS_DEFAULT
@@ -145,7 +148,131 @@ def run_clear_logs(config_file, assume_yes=False):
     return 0
 
 
-def main(config_file="config.yaml", dry_run=False, test_mail=False, test_transfer=False, test_db=False, test_query=None):
+def _find_last_successful_backup_dir(history_dir, oracle_sid):
+    """History'den bu instance'a ait en yeni BAŞARILI backup klasörünü (`directory`) döner; yoksa None.
+
+    Bu ay + önceki ay dosyaları okunur (ay sınırında son yedek geçen ayda olabilir). Yalnızca
+    operation=='Backup', status=='SUCCESS', silinmemiş ve db_name eşleşen kayıtlar; run_time'a göre en yeni.
+    """
+    records = []
+    seen = set()
+    for d in (datetime.now(), datetime.now() - timedelta(days=31)):
+        hf = get_history_file(history_dir, d)
+        if hf in seen:
+            continue
+        seen.add(hf)
+        if os.path.exists(hf):
+            try:
+                with open(hf, "r") as f:
+                    records.extend(json.load(f))
+            except Exception:
+                pass
+    candidates = [
+        r for r in records
+        if r.get("operation") == "Backup" and str(r.get("status", "")).upper() == "SUCCESS"
+        and not r.get("is_deleted") and r.get("db_name", oracle_sid) == oracle_sid
+        and r.get("directory") and r.get("directory") != "-"
+    ]
+    if not candidates:
+        return None
+    candidates.sort(key=lambda r: r.get("run_time", ""))
+    return candidates[-1]["directory"]
+
+
+def resend_backup(logger, ssh_client, backup_config, oracle_sid, local_full_path, run_id,
+                  history_dir, watchdog=None, dry_run=False, context_label="manual"):
+    """Bir yedek klasörünün uzak hedefe TAM geçtiğini doğrular; eksik/bozuksa yeniden gönderir.
+
+    Akış: verify → tamsa çık (gönderme yok) → değilse eksikleri logla, gönder, RE-VERIFY, transfer
+    `BackupRecord` yaz (operation '<method> (resend)'). Döner: True (uzak tam) / False (hâlâ eksik).
+    Pre-backup kancası ve `--resend` modu ikisi de bunu kullanır.
+    """
+    # local_full_path: {backup_root}/{SID}/{MONTH}/{DDMMYY} → month_name/ddmmyy türet.
+    ddmmyy = os.path.basename(local_full_path.rstrip("/"))
+    month_name = os.path.basename(os.path.dirname(local_full_path.rstrip("/")))
+    paths = build_remote_paths(backup_config, oracle_sid, month_name, ddmmyy)
+
+    v = verify_remote_backup(logger, ssh_client, backup_config, paths, local_full_path)
+    if v["local_count"] == 0:
+        logger.warning(f"[{context_label}] Yerel yedek klasöründe dosya yok veya erişilemedi: {local_full_path}")
+        return False
+    if v["ok"]:
+        logger.info(f"[{context_label}] Son yedek uzak hedefte zaten tam ({v['local_count']} dosya): {paths['remote_path_only']}")
+        return True
+
+    logger.warning(f"[{context_label}] Uzak yedek EKSİK: {len(v['missing'])} eksik, "
+                   f"{len(v['mismatched'])} boyut-uyumsuz (yerel {v['local_count']} / uzak {v['remote_count']}). "
+                   f"Yeniden gönderiliyor: {local_full_path} → {paths['remote_transfer_dest']}")
+    if v["missing"]:
+        logger.info(f"[{context_label}] Eksik dosyalar: {', '.join(v['missing'][:20])}"
+                    + (" ..." if len(v['missing']) > 20 else ""))
+    if v["mismatched"]:
+        logger.info(f"[{context_label}] Boyut-uyumsuz dosyalar: {', '.join(v['mismatched'][:20])}"
+                    + (" ..." if len(v['mismatched']) > 20 else ""))
+
+    if dry_run:
+        logger.info(f"[DRY-RUN][{context_label}] Would resend to {paths['remote_transfer_dest']}")
+        return False
+
+    start = datetime.now()
+    start_t = time.time()
+    method = backup_config.get("transfer_method", "rsync").lower()
+    try:
+        method, elapsed, avg_speed, attempts = send_backup_dir(
+            logger, ssh_client, backup_config, paths, local_full_path,
+            watchdog=watchdog, get_dir_size_fn=get_dir_size_gb)
+        # Gönderim sonrası tekrar doğrula (kısmi/yeni eksik kalmadığından emin ol).
+        v2 = verify_remote_backup(logger, ssh_client, backup_config, paths, local_full_path)
+        resend_ok = v2["ok"]
+        if resend_ok:
+            logger.info(f"[{context_label}] Yeniden gönderim tamamlandı ve doğrulandı ({v2['local_count']} dosya).")
+        else:
+            logger.error(f"[{context_label}] Yeniden gönderim sonrası hâlâ eksik: "
+                         f"{len(v2['missing'])} eksik, {len(v2['mismatched'])} boyut-uyumsuz.")
+        append_history(history_dir, BackupRecord(
+            run_time=start.strftime("%Y-%m-%d %H:%M:%S"),
+            start_time=start.strftime("%Y-%m-%d %H:%M:%S"),
+            end_time=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            operation=f"{method.capitalize()} (resend)",
+            directory=paths["remote_full_dest"],
+            duration=format_duration(elapsed),
+            size_gb=f"{get_dir_size_gb(ssh_client, local_full_path):.1f}",
+            status="SUCCESS" if resend_ok else "FAILED",
+            severity="INFO" if resend_ok else "ERROR",
+            run_id=run_id,
+            db_name=oracle_sid,
+            remote_path_only=paths["remote_path_only"],
+            transfer_speed_mbps=round(avg_speed, 2),
+            total_attempts=attempts,
+            remote_backup=True,
+            remote_complete=resend_ok,
+            remote_fail_desc=None if resend_ok else f"{len(v2['missing'])} missing / {len(v2['mismatched'])} size-mismatch after resend",
+        ))
+        return resend_ok
+    except Exception as e:
+        logger.error(f"[{context_label}] Yeniden gönderim başarısız: {e}")
+        append_history(history_dir, BackupRecord(
+            run_time=start.strftime("%Y-%m-%d %H:%M:%S"),
+            start_time=start.strftime("%Y-%m-%d %H:%M:%S"),
+            end_time=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            operation=f"{method.capitalize()} (resend)",
+            directory=paths["remote_full_dest"],
+            duration=format_duration(time.time() - start_t),
+            size_gb="0",
+            status="FAILED",
+            severity="ERROR",
+            run_id=run_id,
+            db_name=oracle_sid,
+            errors_warnings=str(e),
+            remote_path_only=paths["remote_path_only"],
+            remote_backup=True,
+            remote_complete=False,
+            remote_fail_desc=str(e),
+        ))
+        return False
+
+
+def main(config_file="config.yaml", dry_run=False, test_mail=False, test_transfer=False, test_db=False, test_query=None, show_command=False, resend=None):
     config = load_config(config_file)
     TARGET_SERVER = config.get("TARGET_SERVER", {})
     ORACLE_CONFIG = config.get("ORACLE_CONFIG", {})
@@ -172,12 +299,17 @@ def main(config_file="config.yaml", dry_run=False, test_mail=False, test_transfe
     log_file = os.path.join(log_dir, f"backup_{file_name}.log")
     jsonl_file = os.path.join(log_dir, f"backup_{file_name}.jsonl")
 
+    # Tanılama/interaktif modlar sonuçlarını logger.info ile ekrana basar → konsol INFO kalmalı.
+    # Normal yedek çalışması: --show-command yoksa ekran yalnızca WARNING/ERROR (her şey log'da).
+    diagnostic = bool(dry_run or test_transfer or test_mail or test_db or test_query)
     if dry_run or test_transfer:
         logger = setup_logging(os.path.join(log_dir, "backup_test.log"),
                                jsonl_file=os.path.join(log_dir, "backup_test.jsonl"),
-                               instance_id=instance_id, run_id=run_id)
+                               instance_id=instance_id, run_id=run_id,
+                               show_command=show_command, diagnostic=diagnostic)
     else:
-        logger = setup_logging(log_file, jsonl_file=jsonl_file, instance_id=instance_id, run_id=run_id)
+        logger = setup_logging(log_file, jsonl_file=jsonl_file, instance_id=instance_id, run_id=run_id,
+                               show_command=show_command, diagnostic=diagnostic)
         latest_link = os.path.join(log_dir, "backup_latest.log")
         try:
             if os.path.exists(latest_link) or os.path.islink(latest_link):
@@ -314,10 +446,53 @@ def main(config_file="config.yaml", dry_run=False, test_mail=False, test_transfe
                 ))
                 sys.exit(1)
 
+        # --- RESEND modu: bir yedeği uza doğrula + eksikleri gönder ve çık (RMAN backup YOK) ---
+        if resend is not None:
+            if not BACKUP_CONFIG.get("remote_dest"):
+                logger.error("--resend: remote_dest yapılandırılmamış, yapılacak bir şey yok.")
+                sys.exit(1)
+            if resend == "last":
+                target_dir = _find_last_successful_backup_dir(history_dir, oracle_sid)
+                if not target_dir:
+                    logger.error("--resend: başarılı bir backup kaydı bulunamadı.")
+                    sys.exit(1)
+            elif "/" in resend or "\\" in resend:
+                target_dir = resend  # doğrudan yol (target sunucudaki tam yol)
+            else:
+                # DDMMYY klasör adı → target'taki yedek dizinlerini tara (mtime artan → en yeni son)
+                matches = [d for d in list_daily_dirs(ssh_client, BACKUP_CONFIG["backup_root"], oracle_sid)
+                           if os.path.basename(d.rstrip("/")) == resend]
+                if not matches:
+                    logger.error(f"--resend: '{resend}' adına uyan yedek klasörü bulunamadı (backup_root altında).")
+                    sys.exit(1)
+                target_dir = matches[-1]
+            logger.info(f"=== RESEND MODE === hedef klasör: {target_dir}")
+            ok = resend_backup(logger, ssh_client, BACKUP_CONFIG, oracle_sid, target_dir, run_id,
+                               history_dir, watchdog=watchdog_cfg, dry_run=dry_run, context_label="manual")
+            sys.exit(0 if ok else 1)
+
+        # --- Pre-backup dayanıklılık kontrolü: yeni backup'tan ÖNCE son yedeğin uzak hedefe TAM
+        # geçtiğini doğrula, eksik/bozuksa yeniden gönder. Başarısızlık yeni backup'ı BLOKLAMAZ
+        # (kullanıcı kararı) — tüm blok try/except ile sarılı, hata → WARNING + devam. Host lock
+        # zaten alındığı için eşzamanlı RMAN transfer'ıyla yarışmaz.
+        if (BACKUP_CONFIG.get("pre_backup_resend_enabled", True)
+                and BACKUP_CONFIG.get("remote_dest")
+                and not dry_run and not test_transfer):
+            try:
+                last_dir = _find_last_successful_backup_dir(history_dir, oracle_sid)
+                if last_dir:
+                    resend_backup(logger, ssh_client, BACKUP_CONFIG, oracle_sid, last_dir, run_id,
+                                  history_dir, watchdog=watchdog_cfg, dry_run=dry_run, context_label="pre-backup")
+                else:
+                    logger.info("Pre-backup: doğrulanacak önceki başarılı backup yok, atlanıyor.")
+            except Exception as e:
+                logger.warning(f"Pre-backup resend kontrolü hata verdi, yeni backup'a devam ediliyor: {e}")
+
         # Watchdog DB progress check (Sinyal 2) + run_rman sarmalayıcısı (temp_dir/watchdog inject)
         progress_check_fn = None
         if watchdog_cfg.get("progress_check_enabled", True):
-            progress_check_fn = make_rman_progress_check(ssh_client, env, db_creds, logger, temp_dir)
+            progress_check_fn = make_rman_progress_check(ssh_client, env, db_creds, logger, temp_dir,
+                                                          watchdog_cfg=watchdog_cfg)
 
         def run_rman_fn(logger_, env_, ssh_, script_, label="rman", db_creds=None):
             return run_rman(logger_, env_, ssh_, script_, label=label, db_creds=db_creds,
@@ -540,50 +715,18 @@ QUIT;
             transfer_start_time = datetime.now()
             transfer_overall_start = time.time()
             try:
-                remote_suffix = f"{oracle_sid}/{month_name}/{day_name_ddmmyy}"
-                remote_parent_suffix = f"{oracle_sid}/{month_name}"
-
-                remote_dest_parts = BACKUP_CONFIG["remote_dest"].split(":", 1)
-                remote_base = remote_dest_parts[0]
-                remote_path = remote_dest_parts[1] if len(remote_dest_parts) > 1 else ""
-
-                remote_full_dest = f"{remote_base}:{remote_path}/{remote_suffix}"
-                remote_transfer_dest = f"{remote_base}:{remote_path}/{remote_parent_suffix}"
-                remote_path_only = f"{remote_path}/{remote_suffix}"
-                remote_path_only_parent = f"{remote_path}/{remote_parent_suffix}"
+                # Uzak yol üretimi tek kaynaktan (transfer.build_remote_paths) — verify/resend ile uyumlu.
+                paths = build_remote_paths(BACKUP_CONFIG, oracle_sid, month_name, day_name_ddmmyy)
+                remote_full_dest = paths["remote_full_dest"]
+                remote_path_only = paths["remote_path_only"]
 
                 if dry_run:
                     logger.info(f"[DRY-RUN] Would execute {transfer_method} to {remote_full_dest}")
                     transfer_elapsed, avg_speed, attempts = 0.5, 100.0, 1
                 else:
-                    os_type = BACKUP_CONFIG.get("os_type", "lin").lower()
-                    ssh_prefix = f"ssh -o StrictHostKeyChecking=no {remote_base} "
-
-                    mkdir_success = False
-                    for mk_attempt in range(1, 4):
-                        if os_type == "win":
-                            win_path = remote_path_only_parent.replace("/", "\\")
-                            if win_path.startswith("\\") and len(win_path) > 2 and win_path[2] == ":":
-                                win_path = win_path[1:]
-                            st, out, err = run_command_wrapper(ssh_client, f"{ssh_prefix} cmd /c mkdir \"{win_path}\"", logger, quiet=True)
-                        else:
-                            st, out, err = run_command_wrapper(ssh_client, f"{ssh_prefix} mkdir -p \"{remote_path_only_parent}\"", logger, quiet=True)
-
-                        if st == 0 or "already exists" in (out + err).lower() or "zaten var" in (out + err).lower():
-                            mkdir_success = True
-                            break
-                        else:
-                            wait = min(2 * (2 ** (mk_attempt - 1)), 30)  # backoff (spec §11.2)
-                            logger.warning(f"Remote directory creation failed (Attempt {mk_attempt}/3). RC={st}, Err={err.strip() or out.strip()}. Retrying in {wait}s...")
-                            time.sleep(wait)
-
-                    if not mkdir_success:
-                        logger.error(f"Failed to create remote directory '{remote_path_only}' after 3 attempts.")
-
-                    if transfer_method == "scp":
-                        transfer_elapsed, avg_speed, attempts, _ = run_scp(logger, ssh_client, full_path, remote_transfer_dest, watchdog=watchdog_cfg, get_dir_size_fn=get_dir_size_gb)
-                    else:
-                        transfer_elapsed, avg_speed, attempts, _ = run_rsync(logger, ssh_client, full_path, remote_transfer_dest, watchdog=watchdog_cfg)
+                    _method, transfer_elapsed, avg_speed, attempts = send_backup_dir(
+                        logger, ssh_client, BACKUP_CONFIG, paths, full_path,
+                        watchdog=watchdog_cfg, get_dir_size_fn=get_dir_size_gb)
 
                 transfer_record = BackupRecord(
                     run_time=transfer_start_time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -745,6 +888,8 @@ if __name__ == "__main__":
     parser.add_argument("--status", action="store_true", help="Print a read-only fleet status summary of all instances and exit.")
     parser.add_argument("--clear-logs", action="store_true", help="Delete ONLY log files (backup_*.log/.jsonl) in this instance's log_dir and exit. History and backups are NOT touched. Uses --config to resolve the log_dir.")
     parser.add_argument("--yes", action="store_true", help="Skip the confirmation prompt (use with --clear-logs for automation).")
+    parser.add_argument("--show-command", action="store_true", help="Show executed commands and the RMAN script on the console during a backup run (live RMAN streaming still goes only to the log). Default console shows only WARNING/ERROR.")
+    parser.add_argument("--resend", nargs="?", const="last", metavar="FOLDER", help="Verify a backup is fully present on the remote destination and re-send any missing/incomplete files, then exit (no new backup). Bare --resend targets the last successful backup; --resend <DDMMYY|path> targets a specific one.")
     args = parser.parse_args()
 
     if args.status:
@@ -753,4 +898,4 @@ if __name__ == "__main__":
     if args.clear_logs:
         sys.exit(run_clear_logs(args.config, assume_yes=args.yes))
 
-    main(config_file=args.config, dry_run=args.dry_run, test_mail=args.test_mail, test_transfer=args.test_transfer, test_db=args.test_db, test_query=args.test_query)
+    main(config_file=args.config, dry_run=args.dry_run, test_mail=args.test_mail, test_transfer=args.test_transfer, test_db=args.test_db, test_query=args.test_query, show_command=args.show_command, resend=args.resend)
