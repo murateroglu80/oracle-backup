@@ -2,7 +2,7 @@
 
 All notable changes to the backup system are documented in this file.
 
-## [Unreleased]
+## [7.1.0] - 2026-08-06
 
 ### Fixed
 - **Watchdog false-positive STALL from cross-server clock skew (Kontrol 1 & 2):** the DB progress
